@@ -1,0 +1,36 @@
+__pycache__/
+*.pyc
+*.so
+*.egg-info/
+
+outputs/
+output/
+logs/
+checkpoints/
+wandb/
+
+# Raw medical data and generated training samples
+data/
+*.dcm
+*.DCM
+*.zip
+*.tar
+*.tar.gz
+
+*.ckpt
+*.pth
+*.nii
+*.nii.gz
+*.npy
+*.npz
+!dataLoader/camera_params.npz
+example/**/projections.npy
+example/**/volume.nii.gz
+
+# Secrets and local credentials
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+secrets.json
