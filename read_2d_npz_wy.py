@@ -1,0 +1,220 @@
+import torch
+from torch.utils.data import DataLoader
+import numpy as np
+
+# class npz_reader_2d_sim_label_real(torch.utils.data.Dataset):
+#     def __init__(self, tripled_data_txt):
+#         super(npz_reader_2d_sim_label_real, self).__init__()
+#         self.tripled_files = open(tripled_data_txt).readlines()
+
+#     def __len__(self):
+#         return len(self.tripled_files)
+
+#     def to_tensor(self, data):
+#         if data.ndim == 2:
+#             data = data[np.newaxis, ...]
+#         elif data.ndim == 3:
+#             pass
+#         data = torch.FloatTensor(data)
+
+#         return data
+
+#     def to_numpy(self, data):
+#         data = data.detach().cpu().numpy()
+#         data = data.squeeze()
+#         if data.ndim == 3:
+#             data = data.transpose(1, 2, 0)
+
+#         return data
+
+#     def get(self, tripled_files):
+#         npzData = np.load(tripled_files[:-1])
+
+#         inputData = npzData['sim']
+#         labelData = npzData['label']
+#         realCT = npzData['real']
+
+#         inputData = np.array(inputData).astype(np.float32) * 50
+#         labelData = np.array(labelData).astype(np.float32) * 50
+#         realCT = np.array(realCT).astype(np.float32) * 50
+#         inputData[inputData < 0] = 0
+#         labelData[labelData < 0] = 0
+#         realCT[realCT < 0] = 0
+#         inputData = self.to_tensor(inputData)
+#         labelData = self.to_tensor(labelData)
+#         realCT = self.to_tensor(realCT)
+
+#         return {'sim': inputData, 'label': labelData, 'real': realCT}
+
+#     def __getitem__(self, idx):
+#         tripled_files = self.tripled_files[idx]
+#         return self.get(tripled_files)
+
+# class npz_reader_2d_sim_label_real_ref(torch.utils.data.Dataset):
+#     def __init__(self, quadruple_data_txt):
+#         super(npz_reader_2d_sim_label_real_ref, self).__init__()
+#         self.quadruple_files = open(quadruple_data_txt).readlines()
+
+#     def __len__(self):
+#         return len(self.quadruple_files)
+
+#     def to_tensor(self, data):
+#         if data.ndim == 2:
+#             data = data[np.newaxis, ...]
+#         elif data.ndim == 3:
+#             pass
+#         data = torch.FloatTensor(data)
+
+#         return data
+
+#     def to_numpy(self, data):
+#         data = data.detach().cpu().numpy()
+#         data = data.squeeze()
+#         if data.ndim == 3:
+#             data = data.transpose(1, 2, 0)
+
+#         return data
+
+#     def get(self, quadruple_files):
+#         npzData = np.load(quadruple_files[:-1])
+
+#         inputData = npzData['sim']
+#         labelData = npzData['label']
+#         realCT = npzData['real']
+#         refCT = npzData['ref']
+
+#         inputData = np.array(inputData).astype(np.float32) * 50
+#         labelData = np.array(labelData).astype(np.float32) * 50
+#         realCT = np.array(realCT).astype(np.float32) * 50
+#         refCT = np.array(refCT).astype(np.float32) * 50
+#         inputData[inputData < 0] = 0
+#         labelData[labelData < 0] = 0
+#         realCT[realCT < 0] = 0
+#         refCT[refCT < 0] = 0
+#         inputData = self.to_tensor(inputData)
+#         labelData = self.to_tensor(labelData)
+#         realCT = self.to_tensor(realCT)
+#         refCT = self.to_tensor(refCT)
+
+#         return {'sim': inputData, 'label': labelData, 'real': realCT, 'ref':refCT}
+
+#     def __getitem__(self, idx):
+#         quadruple_files = self.quadruple_files[idx]
+#         return self.get(quadruple_files)
+
+class npz_reader_2d_data_with_prior(torch.utils.data.Dataset):
+    def __init__(self, data_with_prior_txt):
+        super(npz_reader_2d_data_with_prior, self).__init__()
+        self.denoised_data_with_prior_files = open(data_with_prior_txt).readlines()
+
+    def __len__(self):
+        return len(self.denoised_data_with_prior_files)
+
+    def to_tensor(self, data):
+        if data.ndim == 2:
+            data = data[np.newaxis, ...]
+        elif data.ndim == 3:
+            pass
+        data = torch.FloatTensor(data)
+
+        return data
+
+    def to_numpy(self, data):
+        data = data.detach().cpu().numpy()
+        data = data.squeeze()
+        if data.ndim == 3:
+            data = data.transpose(1, 2, 0)
+
+        return data
+
+    def get(self, denoised_data_with_prior_files):
+        npzData = np.load(denoised_data_with_prior_files[:-1])
+
+        inputData = npzData['input']
+        labelData = npzData['label']
+        priorData = npzData['prior']
+
+        scale_factor = np.random.uniform(0.9, 1.1)
+        inputData = np.array(inputData).astype(np.float32) * 50 * scale_factor
+        labelData = np.array(labelData).astype(np.float32) * 50 * scale_factor
+        priorData = np.array(priorData).astype(np.float32) * 50 * scale_factor
+        # inputData = np.array(inputData).astype(np.float32) * 50
+        # labelData = np.array(labelData).astype(np.float32) * 50
+        # priorData = np.array(priorData).astype(np.float32) * 50
+
+        inputData[inputData < 0] = 0
+        labelData[labelData < 0] = 0
+        priorData[priorData < 0] = 0
+
+        inputData = self.to_tensor(inputData)
+        labelData = self.to_tensor(labelData)
+        priorData = self.to_tensor(priorData)
+
+        return {'input': inputData, 'label': labelData, 'prior': priorData}
+
+    def __getitem__(self, idx):
+        denoised_data_with_prior = self.denoised_data_with_prior_files[idx]
+        return self.get(denoised_data_with_prior)
+
+# class npz_reader_2d_adv_data_with_prior(torch.utils.data.Dataset):
+#     def __init__(self, adv_data_with_prior_txt):
+#         super(npz_reader_2d_adv_data_with_prior, self).__init__()
+#         self.adv_data_with_prior_files = open(adv_data_with_prior_txt).readlines()
+
+#     def __len__(self):
+#         return len(self.adv_data_with_prior_files)
+
+#     def to_tensor(self, data):
+#         if data.ndim == 2:
+#             data = data[np.newaxis, ...]
+#         elif data.ndim == 3:
+#             pass
+#         data = torch.FloatTensor(data)
+
+#         return data
+
+#     def to_numpy(self, data):
+#         data = data.detach().cpu().numpy()
+#         data = data.squeeze()
+#         if data.ndim == 3:
+#             data = data.transpose(1, 2, 0)
+
+#         return data
+
+#     def get(self, adv_data_with_prior_files):
+#         npzData = np.load(adv_data_with_prior_files[:-1])
+
+#         inputData = npzData['sim']
+#         labelData = npzData['label']
+#         simpriorData = npzData['sprior']
+#         realCT = npzData['real']
+#         refCT = npzData['ref']
+#         realpriorData = npzData['rprior']
+
+#         inputData = np.array(inputData).astype(np.float32) * 50
+#         labelData = np.array(labelData).astype(np.float32) * 50
+#         simpriorData = np.array(simpriorData).astype(np.float32) * 50
+#         realCT = np.array(realCT).astype(np.float32) * 50
+#         refCT = np.array(refCT).astype(np.float32) * 50
+#         realpriorData = np.array(realpriorData).astype(np.float32) * 50
+
+#         inputData[inputData < 0] = 0
+#         labelData[labelData < 0] = 0
+#         simpriorData[simpriorData < 0] = 0
+#         realCT[realCT < 0] = 0
+#         refCT[refCT < 0] = 0
+#         realpriorData[realpriorData < 0] = 0
+
+#         inputData = self.to_tensor(inputData)
+#         labelData = self.to_tensor(labelData)
+#         simpriorData = self.to_tensor(simpriorData)
+#         realCT = self.to_tensor(realCT)
+#         refCT = self.to_tensor(refCT)
+#         realpriorData = self.to_tensor(realpriorData)
+
+#         return {'sim': inputData, 'label': labelData, 'simPrior': simpriorData,
+#                 'real': realCT, 'ref': refCT, 'realPrior': realpriorData}
+
+#     def __getitem__(self, idx):
+#        adv_data_with_prior = self.adv_data_with_prior_files[idx]
+#        return self.get(adv_data_with_prior)
