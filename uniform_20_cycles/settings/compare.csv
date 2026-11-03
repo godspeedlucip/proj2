@@ -1,0 +1,9 @@
+ ,Mean,Min,Max
+truth_contrast,0.033,0.03,0.036
+truth_tissue,0.023,0.021,0.025
+truth_air,0.009,0.009,0.01
+truth_bone,0.04,0.039,0.041
+moni_contrast,0.043,0.041,0.045
+moni_bone,0.042,0.042,0.043
+moni_air,-0.008,-0.009,-0.006
+moni_tissue,0.023,0.022,0.024
