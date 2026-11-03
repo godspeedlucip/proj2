@@ -5,6 +5,8 @@ per-series geometry, source-voxel FOV shift, circular FOV mask, 256-pixel
 transverse crop or resize, voxel spacing, and TIFF/NIfTI formats. No
 projection or FDK is performed. Output names are ``phase_XX_gt`` under
 ``outputs/round1_contrast_gt/<series>``.
+When ``fov_source_pixels`` is positive in the settings CSV, GT is sampled
+directly on the same wider fixed-size physical grid as reconstruction.
 
 Examples::
 
@@ -37,6 +39,7 @@ from generate_round1_contrast_recon import (
     load_series_settings,
     save_image,
     select_series,
+    settings_signature,
 )
 
 
@@ -88,22 +91,41 @@ def make_phase_gt(
     """Sample calibrated CT on the same grid and postprocess as sparse FDK."""
     source_shape = tuple(int(v) for v in hu.shape)
     fov_shape, used_spacing, offset = phase_grid(source_shape, source_spacing, settings)
+    source_step = np.ones(3, dtype=np.float64)
+    output_shape = fov_shape.copy()
+    if settings.fov_source_pixels:
+        detector_fov_mm = (
+            np.asarray(settings.n_detector, np.float64)
+            * np.asarray(settings.d_detector_mm, np.float64)
+            * settings.dso_mm / settings.dsd_mm
+        )
+        if np.any(settings.fov_source_pixels * used_spacing[1:] > detector_fov_mm[1] + 1e-6):
+            raise ValueError("Requested transverse FOV exceeds the unpadded detector FOV")
+        output_shape[1:] = settings.fov_output_pixels
+        source_step[1:] = settings.fov_source_pixels / settings.fov_output_pixels
+        shifts = np.asarray([
+            0,
+            settings.shift_down_voxels - settings.shift_up_voxels,
+            settings.shift_right_voxels - settings.shift_left_voxels,
+        ], np.float64)
+        offset = (np.asarray(source_shape, np.float64) - 1) / 2 + shifts - (output_shape - 1) / 2 * source_step
+    output_spacing = used_spacing * source_step
     # Read only the input slab needed by this FOV. This also works with a
     # nibabel proxy, avoiding a full 3-D float32 copy of every CT phase.
     first = np.floor(offset).astype(int)
-    last = np.ceil(offset + fov_shape - 1).astype(int) + 1
+    last = np.ceil(offset + source_step * (output_shape - 1)).astype(int) + 1
     start = np.maximum(first, 0)
     stop = np.minimum(last, source_shape)
     if np.any(stop <= start):
-        sampled = np.full(tuple(fov_shape), air_value, np.float32)
+        sampled = np.full(tuple(output_shape), air_value, np.float32)
     else:
         source = np.asarray(hu[tuple(slice(int(a), int(b)) for a, b in zip(start, stop))], np.float32)
         calibrated = calibrated_volume(source, polynomial, air_threshold, air_value)
         sampled = affine_transform(
             calibrated,
-            matrix=np.eye(3),
+            matrix=np.diag(source_step),
             offset=offset - start,
-            output_shape=tuple(int(v) for v in fov_shape),
+            output_shape=tuple(int(v) for v in output_shape),
             order=1,
             mode="constant",
             cval=float(air_value),
@@ -117,11 +139,11 @@ def make_phase_gt(
         * settings.dso_mm / settings.dsd_mm
     )
     nz, ny, nx = sampled.shape
-    z_mm = (np.arange(nz) - (nz - 1) / 2) * used_spacing[0]
-    y_mm = (np.arange(ny) - (ny - 1) / 2) * used_spacing[1]
-    x_mm = (np.arange(nx) - (nx - 1) / 2) * used_spacing[2]
-    radius_y = object_fov_yx[1] / 2 - settings.fov_mask_shrink_pixels / 2 * used_spacing[1]
-    radius_x = object_fov_yx[1] / 2 - settings.fov_mask_shrink_pixels / 2 * used_spacing[2]
+    z_mm = (np.arange(nz) - (nz - 1) / 2) * output_spacing[0]
+    y_mm = (np.arange(ny) - (ny - 1) / 2) * output_spacing[1]
+    x_mm = (np.arange(nx) - (nx - 1) / 2) * output_spacing[2]
+    radius_y = object_fov_yx[1] / 2 - settings.fov_mask_shrink_pixels / 2 * output_spacing[1]
+    radius_x = object_fov_yx[1] / 2 - settings.fov_mask_shrink_pixels / 2 * output_spacing[2]
     if radius_y <= 0 or radius_x <= 0:
         raise ValueError("FOV mask radius is not positive; check detector geometry")
     mask = (
@@ -132,6 +154,8 @@ def make_phase_gt(
     sampled = np.where(mask, sampled, 0).astype(np.float32, copy=False)
 
     width = settings.fov_output_pixels
+    if settings.fov_source_pixels:
+        return sampled, tuple(float(v) for v in output_spacing)
     if min(ny, nx) < width:
         sampled = zoom(
             sampled, (1.0, width / ny, width / nx),
@@ -145,13 +169,12 @@ def make_phase_gt(
                 ((0, 0), (pad_y // 2, pad_y - pad_y // 2),
                  (pad_x // 2, pad_x - pad_x // 2)),
             )
-        used_spacing = used_spacing.copy()
-        used_spacing[1] *= ny / width
-        used_spacing[2] *= nx / width
+        output_spacing[1] *= ny / width
+        output_spacing[2] *= nx / width
     else:
         y_start, x_start = (ny - width) // 2, (nx - width) // 2
         sampled = sampled[:, y_start:y_start + width, x_start:x_start + width]
-    return sampled, tuple(float(v) for v in used_spacing)
+    return sampled, tuple(float(v) for v in output_spacing)
 
 
 def process_series(
@@ -222,7 +245,7 @@ def signature(
     settings: SeriesSettings, calibration_csv: Path, phase_paths: dict[int, Path]
 ) -> dict[str, Any]:
     return {
-        "settings": asdict(settings),
+        "settings": settings_signature(settings),
         "calibration_csv": {
             "path": str(calibration_csv.resolve()),
             "sha256": hashlib.sha256(calibration_csv.read_bytes()).hexdigest(),
@@ -294,7 +317,7 @@ def main() -> int:
             recon_config_path = reconstruction_dir / "reconstruction_config.json"
             if recon_config_path.is_file():
                 recon_config = json.loads(recon_config_path.read_text(encoding="utf-8"))
-                if (recon_config.get("settings") != asdict(settings)
+                if (recon_config.get("settings") != settings_signature(settings)
                         or recon_config.get("calibration_csv") != config["calibration_csv"]):
                     raise ValueError(
                         f"Reconstruction settings or calibration differ from current GT inputs: {recon_config_path}"

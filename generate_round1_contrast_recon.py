@@ -9,6 +9,10 @@ original CT slices; positive ``shift_right_voxels`` moves it toward larger
 column indices. To move anatomy downward in the reconstructed image, move the
 sampled FOV upward in the source CT. The shifts use source CT voxel counts
 before reconstruction.
+Optional ``fov_source_pixels`` sets the transverse physical FOV in source
+voxel counts while keeping ``fov_output_pixels`` fixed. Zero uses the
+original crop/resize behavior. A positive value must fit the unpadded
+detector FOV; the projection geometry is unchanged.
 
 Run with ``--list`` to inspect inputs without TIGRE or GPU work. For example,
 ``--series Stent_2_7596 --list`` previews one pig, and
@@ -79,6 +83,8 @@ class SeriesSettings:
     padding_row_pixels: int = 100
     padding_col_pixels: int = 100
     fov_output_pixels: int = 256
+    # Transverse FOV width in source voxels. Zero retains the legacy crop.
+    fov_source_pixels: int = 0
     fov_mask_shrink_pixels: int = 10
 
     @property
@@ -92,7 +98,7 @@ class SeriesSettings:
     def validate(self) -> None:
         for name in ("shift_up_voxels", "shift_down_voxels", "shift_left_voxels",
                      "shift_right_voxels", "padding_row_pixels", "padding_col_pixels",
-                     "fov_mask_shrink_pixels"):
+                     "fov_mask_shrink_pixels", "fov_source_pixels"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be non-negative")
         for name in ("n_detector_rows", "n_detector_cols", "n_projections", "fov_output_pixels"):
@@ -115,7 +121,8 @@ def load_series_settings(csv_path: Path) -> dict[str, SeriesSettings]:
     result: dict[str, SeriesSettings] = {}
     with csv_path.open("r", newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
-        required = {"series", *defaults}
+        # Older settings CSVs omit the optional wide-FOV column.
+        required = {"series", *(set(defaults) - {"fov_source_pixels"})}
         if reader.fieldnames is None or not required.issubset(reader.fieldnames):
             raise ValueError(f"Settings CSV must contain columns: {sorted(required)}")
         for row in reader:
@@ -126,7 +133,7 @@ def load_series_settings(csv_path: Path) -> dict[str, SeriesSettings]:
                 raise ValueError(f"Duplicate settings for series: {name}")
             values = {
                 key: (int(row[key]) if key in int_fields else float(row[key]))
-                if row[key] is not None and row[key].strip() else default
+                if row.get(key) is not None and row[key].strip() else default
                 for key, default in defaults.items()
             }
             settings = SeriesSettings(**values)
@@ -224,6 +231,14 @@ def output_paths(output_dir: Path, labels: tuple[int, ...]) -> list[Path]:
     return [output_dir / f"{stem}{suffix}" for stem in stems for suffix in (".tif", ".nii.gz")]
 
 
+def settings_signature(settings: SeriesSettings) -> dict[str, Any]:
+    """Keep disabled wide-FOV settings compatible with existing sidecars."""
+    values = asdict(settings)
+    if settings.fov_source_pixels == 0:
+        values.pop("fov_source_pixels")
+    return values
+
+
 def configuration_signature(
     settings: SeriesSettings, cycle_csv: Path, calibration_csv: Path
 ) -> dict[str, Any]:
@@ -235,7 +250,7 @@ def configuration_signature(
         }
 
     return {
-        "settings": asdict(settings),
+        "settings": settings_signature(settings),
         "cycle_csv": source(cycle_csv),
         "calibration_csv": source(calibration_csv),
     }
@@ -329,6 +344,7 @@ def process_series(
         "padding_row_pixels": settings.padding_row_pixels,
         "padding_col_pixels": settings.padding_col_pixels,
         "fov_output_transverse_pixels": settings.fov_output_pixels,
+        "fov_source_pixels": settings.fov_source_pixels,
         "fov_mask_diameter_shrink_pixels": settings.fov_mask_shrink_pixels,
     }
     prior, output_spacing = reconstruct_prior(

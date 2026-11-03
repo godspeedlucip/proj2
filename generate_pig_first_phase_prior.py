@@ -169,9 +169,10 @@ def reconstruct_prior(
     padding_row_pixels: int = PADDING_ROW_PIXELS,
     padding_col_pixels: int = PADDING_COL_PIXELS,
     fov_output_transverse_pixels: int = FOV_OUTPUT_TRANSVERSE_PIXELS,
+    fov_source_pixels: int = 0,
     fov_mask_diameter_shrink_pixels: int = FOV_MASK_DIAMETER_SHRINK_PIXELS,
 ) -> tuple[np.ndarray, tuple[float, float, float]]:
-    """Run FDK and apply the notebook's circular FOV mask and center crop."""
+    """Run FDK, optionally directly on a wider fixed-size transverse grid."""
     if tuple(projections.shape[1:]) != tuple(int(v) for v in geometry.nDetector):
         raise ValueError(
             f"Projection detector shape {projections.shape[1:]} does not match "
@@ -180,6 +181,8 @@ def reconstruct_prior(
 
     if padding_row_pixels < 0 or padding_col_pixels < 0:
         raise ValueError("Projection padding must be non-negative")
+    if fov_output_transverse_pixels < 1 or fov_source_pixels < 0:
+        raise ValueError("FOV pixel counts must be valid")
     padded = ProjectionTool.pad_linatech(projections, padding=padding_row_pixels)
     padded = np.transpose(padded, (0, 2, 1))
     padded = ProjectionTool.pad_linatech(padded, padding=padding_col_pixels)
@@ -202,10 +205,17 @@ def reconstruct_prior(
     fov_shape = np.floor(fov_size_mm_zyx / np.asarray(geometry.dVoxel, dtype=np.float64)).astype(np.int32)
     fov_shape = np.maximum(fov_shape, 1)
     fov_shape = np.minimum(fov_shape, np.asarray(geometry.nVoxel, dtype=np.int32))
+    output_spacing = np.asarray(geometry.dVoxel, dtype=np.float64).copy()
+    if fov_source_pixels:
+        requested_mm = fov_source_pixels * output_spacing[1:]
+        if np.any(requested_mm > object_fov_mm[1] + 1e-6):
+            raise ValueError("Requested transverse FOV exceeds the unpadded detector FOV")
+        fov_shape[1:] = fov_output_transverse_pixels
+        output_spacing[1:] *= fov_source_pixels / fov_output_transverse_pixels
 
     fov_geometry = tigre_tool.set_geometry(
         volume_shape=tuple(int(v) for v in fov_shape),
-        voxel_spacing=tuple(float(v) for v in geometry.dVoxel),
+        voxel_spacing=tuple(float(v) for v in output_spacing),
         n_detector=tuple(int(v) for v in padded_detector),
         d_detector=tuple(float(v) for v in geometry.dDetector),
         dso=float(geometry.DSO),
@@ -219,11 +229,11 @@ def reconstruct_prior(
     )
 
     nz, ny, nx = reconstruction.shape
-    z_mm = (np.arange(nz, dtype=np.float64) - (nz - 1) / 2) * float(geometry.dVoxel[0])
-    y_mm = (np.arange(ny, dtype=np.float64) - (ny - 1) / 2) * float(geometry.dVoxel[1])
-    x_mm = (np.arange(nx, dtype=np.float64) - (nx - 1) / 2) * float(geometry.dVoxel[2])
-    radius_y = object_fov_mm[1] / 2 - (fov_mask_diameter_shrink_pixels / 2) * float(geometry.dVoxel[1])
-    radius_x = object_fov_mm[1] / 2 - (fov_mask_diameter_shrink_pixels / 2) * float(geometry.dVoxel[2])
+    z_mm = (np.arange(nz, dtype=np.float64) - (nz - 1) / 2) * float(fov_geometry.dVoxel[0])
+    y_mm = (np.arange(ny, dtype=np.float64) - (ny - 1) / 2) * float(fov_geometry.dVoxel[1])
+    x_mm = (np.arange(nx, dtype=np.float64) - (nx - 1) / 2) * float(fov_geometry.dVoxel[2])
+    radius_y = object_fov_mm[1] / 2 - (fov_mask_diameter_shrink_pixels / 2) * float(fov_geometry.dVoxel[1])
+    radius_x = object_fov_mm[1] / 2 - (fov_mask_diameter_shrink_pixels / 2) * float(fov_geometry.dVoxel[2])
     if radius_y <= 0 or radius_x <= 0:
         raise ValueError("FOV mask radius is not positive; check detector geometry")
     fov_mask = (

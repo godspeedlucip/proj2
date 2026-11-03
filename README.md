@@ -22,3 +22,10 @@ Remove `--list` to generate data. Use the same settings and calibration CSVs for
 both commands so the GT matches the sparse reconstruction. No CT volumes or
 generated output images are included in this branch. In the original local
 workspace, prefix script and settings paths in these examples with `get_data/`.
+
+The optional `fov_source_pixels` CSV column sets the transverse physical FOV
+in CSV-adjusted source voxel counts while `fov_output_pixels` keeps the output
+matrix size fixed. For example, Round 5 Control 1 uses `300` source pixels on
+a `256×256` output grid. Set `0` or omit the column for the original crop.
+The requested FOV must fit within the unpadded detector width. Run the
+reconstruction and GT with the same settings CSV so their grids match.
