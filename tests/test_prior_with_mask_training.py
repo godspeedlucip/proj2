@@ -224,6 +224,38 @@ def test_boundary_mode_rejects_training_set_without_exact_masks(tmp_path, monkey
         ])
 
 
+def test_mask_labels_file_selects_label_for_training_and_validation(tmp_path, monkeypatch):
+    monkeypatch.setattr(training, "Dense2D", TinyTwoInput)
+    sample_path = tmp_path / "case01_p0_slice0.npz"
+    mask = np.zeros((7, 7), dtype=np.uint8)
+    mask[2:5, 2:5] = 1
+    mask[3, 3] = 2
+    label = np.zeros((7, 7), dtype=np.float32)
+    label[3, 3] = 1
+    np.savez(sample_path, input=np.zeros((7, 7), dtype=np.float32),
+             prior=np.zeros((7, 7), dtype=np.float32), label=label,
+             mask=mask, mask_quality=np.array(1, dtype=np.int8))
+    sample_list = tmp_path / "samples.txt"
+    sample_list.write_text(str(sample_path) + "\n", encoding="utf-8")
+    labels_file = tmp_path / "mask-labels.json"
+    labels_file.write_text("[2]", encoding="utf-8")
+    checkpoint = tmp_path / "base.dat"
+    torch.save({"state_dict": TinyTwoInput().state_dict()}, checkpoint)
+    output = tmp_path / "output"
+    training.main([
+        "--stage", "finetune", "--base-valid-list", str(sample_list),
+        "--masked-train-list", str(sample_list),
+        "--masked-valid-list", str(sample_list),
+        "--base-checkpoint", str(checkpoint), "--output-dir", str(output),
+        "--num-workers", "0", "--batch-size", "1", "--finetune-epochs", "1",
+        "--loss-mode", "roi", "--mask-labels-file", str(labels_file),
+    ])
+    record = json.loads((output / "finetune/roi/metrics.jsonl").read_text().splitlines()[0])
+    assert record["valid_masked"]["roi_exact_mse"] > record["valid_masked"]["full_mse"]
+    saved = torch.load(output / "finetune/roi/latest.pt", weights_only=False)
+    assert saved["config"]["mask_labels"] == [2]
+
+
 def test_both_and_standalone_finetune_reproduce_and_record_source(tmp_path, monkeypatch):
     monkeypatch.setattr(training, "Dense2D", TinyTwoInput)
     sample_path = tmp_path / "case01_p0_slice0.npz"

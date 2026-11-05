@@ -66,6 +66,35 @@ def test_masked_reader_preserves_known_quality_and_binary_mask(tmp_path, quality
     assert set(item["mask"].unique().tolist()) == {0.0, 1.0}
 
 
+def test_masked_reader_includes_every_positive_label_by_default(tmp_path):
+    mask = np.array([[0, 1, 2, 0], [0, 2, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]], dtype=np.uint8)
+    sample = sample_file(tmp_path, mask=mask)
+    dataset = npz_reader_2d_data_with_prior(
+        str(list_file(tmp_path, sample)), training=False, require_mask=True
+    )
+    assert dataset[0]["mask"].squeeze().tolist() == [
+        [0.0, 1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
+    ]
+
+
+def test_masked_reader_can_select_label_two_only(tmp_path):
+    mask = np.array([[1, 1, 2, 0], [1, 2, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]], dtype=np.uint8)
+    sample = sample_file(tmp_path, mask=mask)
+    dataset = npz_reader_2d_data_with_prior(
+        str(list_file(tmp_path, sample)), training=False, require_mask=True,
+        mask_labels=(2,)
+    )
+    assert dataset[0]["mask"].squeeze().tolist() == [
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
+    ]
+
+
 @pytest.mark.parametrize(
     "mask",
     [
@@ -74,6 +103,7 @@ def test_masked_reader_preserves_known_quality_and_binary_mask(tmp_path, quality
         np.ones((3, 4), dtype=np.uint8),
         np.full((4, 4), 2, dtype=np.uint8),
         np.full((4, 4), np.nan, dtype=np.float32),
+        np.array([[0, -1, 2, 0]] * 4, dtype=np.int8),
     ],
 )
 def test_masked_reader_rejects_bad_mask_with_path(tmp_path, mask):
@@ -92,6 +122,26 @@ def test_masked_reader_rejects_missing_mask_with_path(tmp_path):
     )
     with pytest.raises(ValueError, match="sample.npz"):
         dataset[0]
+
+
+def test_masked_reader_rejects_selection_with_no_foreground(tmp_path):
+    mask = np.zeros((4, 4), dtype=np.uint8)
+    mask[1:3, 1:3] = 1
+    sample = sample_file(tmp_path, mask=mask)
+    dataset = npz_reader_2d_data_with_prior(
+        str(list_file(tmp_path, sample)), require_mask=True, mask_labels=(2,)
+    )
+    with pytest.raises(ValueError, match="sample.npz"):
+        dataset[0]
+
+
+@pytest.mark.parametrize("labels", [[], [0], [-1], [True], [float("nan")], "2"])
+def test_masked_reader_rejects_invalid_label_selection(tmp_path, labels):
+    sample = sample_file(tmp_path)
+    with pytest.raises(ValueError, match="mask_labels"):
+        npz_reader_2d_data_with_prior(
+            str(list_file(tmp_path, sample)), require_mask=True, mask_labels=labels
+        )
 
 
 @pytest.mark.parametrize("quality", [np.array(1.0), np.array([1]), np.array(2)])

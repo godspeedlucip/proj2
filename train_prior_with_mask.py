@@ -242,6 +242,8 @@ def _make_parser():
     parser.add_argument("--base-valid-list", required=True)
     parser.add_argument("--masked-train-list")
     parser.add_argument("--masked-valid-list")
+    parser.add_argument("--mask-labels-file", type=Path,
+                        help="JSON array of positive mask labels to include; default: all values > 0")
     parser.add_argument("--base-checkpoint")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--device", default="auto")
@@ -266,6 +268,9 @@ def _make_parser():
 def main(argv=None):
     parser = _make_parser()
     args = parser.parse_args(argv)
+    mask_labels = None
+    if args.mask_labels_file is not None:
+        mask_labels = json.loads(args.mask_labels_file.read_text(encoding="utf-8"))
     if args.stage in {"base", "both"} and not args.base_train_list:
         parser.error("--base-train-list is required for base and both")
     if args.stage in {"finetune", "both"} and not (args.masked_train_list and args.masked_valid_list):
@@ -283,6 +288,8 @@ def main(argv=None):
     output = Path(args.output_dir)
     model = Dense2D().to(device)
     config = vars(args).copy()
+    config["mask_labels_file"] = str(args.mask_labels_file.resolve()) if args.mask_labels_file else None
+    config["mask_labels"] = mask_labels
     loss_config = {
         "mode": args.loss_mode,
         "radius": args.boundary_radius,
@@ -335,15 +342,19 @@ def main(argv=None):
         config["base_checkpoint_path"] = str(base_checkpoint.resolve())
         config["base_checkpoint_sha256"] = checkpoint_sha256(base_checkpoint)
         seed_everything(args.seed + 1000003)
-        masked_train = npz_reader_2d_data_with_prior(args.masked_train_list, training=True, require_mask=True)
+        masked_train = npz_reader_2d_data_with_prior(
+            args.masked_train_list, training=True, require_mask=True, mask_labels=mask_labels
+        )
         masked_valid = npz_reader_2d_data_with_prior(
-            args.masked_valid_list, training=False, require_mask=True, return_case_id=True
+            args.masked_valid_list, training=False, require_mask=True,
+            return_case_id=True, mask_labels=mask_labels
         )
         if not len(masked_train) or not len(masked_valid):
             raise ValueError("masked train and validation lists must be nonempty")
         if args.loss_mode in {"boundary", "gradient"}:
             audit_train = npz_reader_2d_data_with_prior(
-                args.masked_train_list, training=False, require_mask=True
+                args.masked_train_list, training=False, require_mask=True,
+                mask_labels=mask_labels
             )
             exact_count = sum(audit_train[index]["mask_quality"].item() == 1
                               for index in range(len(audit_train)))

@@ -104,7 +104,8 @@ import numpy as np
 
 class npz_reader_2d_data_with_prior(torch.utils.data.Dataset):
     def __init__(self, data_with_prior_txt: str, *, training: bool = True,
-                 require_mask: bool = False, return_case_id: bool = False):
+                 require_mask: bool = False, return_case_id: bool = False,
+                 mask_labels=None):
         super(npz_reader_2d_data_with_prior, self).__init__()
         self.denoised_data_with_prior_files = []
         self.quality_overrides = []
@@ -123,6 +124,12 @@ class npz_reader_2d_data_with_prior(torch.utils.data.Dataset):
         self.training = training
         self.require_mask = require_mask
         self.return_case_id = return_case_id
+        if mask_labels is not None:
+            if (not isinstance(mask_labels, (list, tuple)) or not mask_labels
+                    or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                           or not np.isfinite(value) or value <= 0 for value in mask_labels)):
+                raise ValueError('mask_labels must be a nonempty list of positive numbers')
+        self.mask_labels = mask_labels
 
     def __len__(self):
         return len(self.denoised_data_with_prior_files)
@@ -157,10 +164,12 @@ class npz_reader_2d_data_with_prior(torch.utils.data.Dataset):
                     raise ValueError(f'{path}: mask shape does not match label')
                 if not np.issubdtype(maskData.dtype, np.number) or not np.isfinite(maskData).all():
                     raise ValueError(f'{path}: mask has nonfinite or nonnumeric values')
-                if not np.logical_or(maskData == 0, maskData == 1).all():
-                    raise ValueError(f'{path}: mask must contain only 0 and 1')
-                if maskData.sum() == 0 or maskData.sum() == maskData.size:
-                    raise ValueError(f'{path}: mask must contain foreground and background')
+                if (maskData < 0).any():
+                    raise ValueError(f'{path}: mask labels must be nonnegative')
+                maskData = (maskData > 0 if self.mask_labels is None
+                            else np.isin(maskData, self.mask_labels))
+                if not maskData.any() or maskData.all():
+                    raise ValueError(f'{path}: selected mask must contain foreground and background')
                 quality = -1
                 if 'mask_quality' in npzData:
                     qualityData = np.asarray(npzData['mask_quality'])
