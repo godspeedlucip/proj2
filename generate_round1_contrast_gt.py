@@ -1,12 +1,13 @@
-"""Generate a calibrated ground-truth volume for each Round 1 sparse phase.
+"""Generate a full-view FDK ground-truth volume for each Round 1 phase.
 
 The output grid follows ``generate_round1_contrast_recon.py``: the same
 per-series geometry, source-voxel FOV shift, circular FOV mask, 256-pixel
-transverse crop or resize, voxel spacing, and TIFF/NIfTI formats. No
-projection or FDK is performed. Output names are ``phase_XX_gt`` under
+transverse crop or resize, voxel spacing, and TIFF/NIfTI formats. Each
+phase CT is projected over the complete scan and reconstructed on its own;
+the prior instead reconstructs the phase-mixed scan. Output names are ``phase_XX_gt`` under
 ``outputs/round1_contrast_gt/<series>``.
-When ``fov_source_pixels`` is positive in the settings CSV, GT is sampled
-directly on the same wider fixed-size physical grid as reconstruction.
+When ``fov_source_pixels`` is positive in the settings CSV, FDK reconstructs
+directly on the same wider fixed-size physical grid as the prior and sparse images.
 
 Examples::
 
@@ -29,10 +30,13 @@ import numpy as np
 from scipy.ndimage import affine_transform, zoom
 
 from generate_pig_first_phase_prior import load_attenuation_calibration
+from generate_pig_first_phase_prior import reconstruct_prior
 from generate_round1_contrast_recon import (
     DEFAULT_ROUND_ROOT,
     DEFAULT_SETTINGS_CSV,
     REPO_ROOT,
+    INTENSITY_PROCESSING,
+    SOURCE_PADDING_HU,
     SeriesSettings,
     calibrated_volume,
     discover_series,
@@ -41,10 +45,13 @@ from generate_round1_contrast_recon import (
     select_series,
     settings_signature,
 )
+from utils.tool import TigreTool
 
 
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "outputs" / "round1_contrast_gt"
 DEFAULT_RECON_ROOT = REPO_ROOT / "outputs" / "round1_contrast_recon"
+PROJECTION_BATCH_SIZE = 64
+GT_GENERATION = "single_phase_full_angle_fdk_v1"
 
 
 def phase_grid(
@@ -87,7 +94,10 @@ def make_phase_gt(
     polynomial: np.poly1d,
     air_threshold: float,
     air_value: float,
-) -> tuple[np.ndarray, tuple[float, float, float]]:
+    *,
+    return_valid_mask: bool = False,
+) -> (tuple[np.ndarray, tuple[float, float, float]]
+      | tuple[np.ndarray, tuple[float, float, float], np.ndarray]):
     """Sample calibrated CT on the same grid and postprocess as sparse FDK."""
     source_shape = tuple(int(v) for v in hu.shape)
     fov_shape, used_spacing, offset = phase_grid(source_shape, source_spacing, settings)
@@ -117,18 +127,34 @@ def make_phase_gt(
     start = np.maximum(first, 0)
     stop = np.minimum(last, source_shape)
     if np.any(stop <= start):
-        sampled = np.full(tuple(output_shape), air_value, np.float32)
+        sampled = np.zeros(tuple(output_shape), np.float32)
+        valid_weights = np.zeros(tuple(output_shape), np.float32)
     else:
         source = np.asarray(hu[tuple(slice(int(a), int(b)) for a, b in zip(start, stop))], np.float32)
-        calibrated = calibrated_volume(source, polynomial, air_threshold, air_value)
+        calibrated = calibrated_volume(
+            source, polynomial, air_threshold, air_value, apply_air_threshold=False
+        )
+        transform = np.diag(source_step)
+        sample_offset = offset - start
         sampled = affine_transform(
             calibrated,
-            matrix=np.diag(source_step),
-            offset=offset - start,
+            matrix=transform,
+            offset=sample_offset,
             output_shape=tuple(int(v) for v in output_shape),
             order=1,
             mode="constant",
-            cval=float(air_value),
+            cval=0.0,
+            prefilter=False,
+            output=np.float32,
+        )
+        valid_weights = affine_transform(
+            (source != SOURCE_PADDING_HU).astype(np.float32),
+            matrix=transform,
+            offset=sample_offset,
+            output_shape=tuple(int(v) for v in output_shape),
+            order=1,
+            mode="constant",
+            cval=0.0,
             prefilter=False,
             output=np.float32,
         )
@@ -151,21 +177,35 @@ def make_phase_gt(
         & ((y_mm[None, :, None] / radius_y) ** 2
            + (x_mm[None, None, :] / radius_x) ** 2 <= 1)
     )
+    valid_weights *= mask
     sampled = np.where(mask, sampled, 0).astype(np.float32, copy=False)
 
     width = settings.fov_output_pixels
     if settings.fov_source_pixels:
-        return sampled, tuple(float(v) for v in output_spacing)
+        valid = valid_weights >= 1.0 - 1e-6
+        sampled[~valid] = 0.0
+        result = (sampled, tuple(float(v) for v in output_spacing))
+        return (*result, valid.astype(np.uint8)) if return_valid_mask else result
     if min(ny, nx) < width:
+        scale = (1.0, width / ny, width / nx)
         sampled = zoom(
-            sampled, (1.0, width / ny, width / nx),
+            sampled, scale,
             order=1, mode="nearest", prefilter=False,
+        )
+        valid_weights = zoom(
+            valid_weights, scale, order=1, mode="nearest", prefilter=False,
         )
         if sampled.shape[1:] != (width, width):
             sampled = sampled[:, :width, :width]
+            valid_weights = valid_weights[:, :width, :width]
             pad_y, pad_x = width - sampled.shape[1], width - sampled.shape[2]
             sampled = np.pad(
                 sampled,
+                ((0, 0), (pad_y // 2, pad_y - pad_y // 2),
+                 (pad_x // 2, pad_x - pad_x // 2)),
+            )
+            valid_weights = np.pad(
+                valid_weights,
                 ((0, 0), (pad_y // 2, pad_y - pad_y // 2),
                  (pad_x // 2, pad_x - pad_x // 2)),
             )
@@ -174,7 +214,11 @@ def make_phase_gt(
     else:
         y_start, x_start = (ny - width) // 2, (nx - width) // 2
         sampled = sampled[:, y_start:y_start + width, x_start:x_start + width]
-    return sampled, tuple(float(v) for v in output_spacing)
+        valid_weights = valid_weights[:, y_start:y_start + width, x_start:x_start + width]
+    valid = valid_weights >= 1.0 - 1e-6
+    sampled[~valid] = 0.0
+    result = (sampled, tuple(float(v) for v in output_spacing))
+    return (*result, valid.astype(np.uint8)) if return_valid_mask else result
 
 
 def process_series(
@@ -188,22 +232,75 @@ def process_series(
     *,
     reconstruction_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Write one GT pair for every source phase and check any sparse partner."""
+    """Project and FDK each phase using all scan angles, then save its GT pair."""
+    settings.validate()
     phase_shapes: dict[str, list[int]] = {}
     source_shape = None
     source_spacing = None
     output_spacing = None
+    tool = TigreTool()
+    geometry = None
+    angles = None
+    reconstruction_options = {
+        "padding_row_pixels": settings.padding_row_pixels,
+        "padding_col_pixels": settings.padding_col_pixels,
+        "fov_output_transverse_pixels": settings.fov_output_pixels,
+        "fov_source_pixels": settings.fov_source_pixels,
+        "fov_mask_diameter_shrink_pixels": settings.fov_mask_shrink_pixels,
+    }
     for phase, path in phase_paths.items():
         image = nib.load(str(path))
         shape = tuple(int(v) for v in image.shape)
         spacing = tuple(float(v) for v in image.header.get_zooms()[:3])
         if source_shape is None:
             source_shape, source_spacing = shape, spacing
+            used_spacing = tuple(v * settings.voxel_spacing_multiplier for v in spacing)
+            geometry = tool.set_geometry(
+                volume_shape=shape,
+                voxel_spacing=used_spacing,
+                n_detector=settings.n_detector,
+                d_detector=settings.d_detector_mm,
+                dso=settings.dso_mm,
+                dsd=settings.dsd_mm,
+            )
+            geometry.offOrigin = np.asarray([
+                0.0,
+                -(settings.shift_down_voxels - settings.shift_up_voxels) * used_spacing[1],
+                -(settings.shift_right_voxels - settings.shift_left_voxels) * used_spacing[2],
+            ], dtype=np.float32)
+            angles = tool.set_angles(0.0, settings.angle_span_deg, settings.n_projections)
         elif shape != source_shape or not np.allclose(spacing, source_spacing, rtol=0, atol=1e-5):
             raise ValueError(f"Phase shape or spacing differs from first phase: {path}")
-        gt, output_spacing = make_phase_gt(
-            image.dataobj, spacing, settings, polynomial, air_threshold, air_value
+        hu = np.asarray(image.dataobj, dtype=np.float32)
+        volume_mu = calibrated_volume(
+            hu, polynomial, air_threshold, air_value, apply_air_threshold=False,
         )
+        del hu
+        projections = np.empty((settings.n_projections, *settings.n_detector), dtype=np.float32)
+        for start in range(0, settings.n_projections, PROJECTION_BATCH_SIZE):
+            stop = min(start + PROJECTION_BATCH_SIZE, settings.n_projections)
+            block = TigreTool.project_tigre(volume_mu, geometry, angles[start:stop])
+            expected_shape = (stop - start, *settings.n_detector)
+            if block.shape != expected_shape:
+                raise RuntimeError(f"GT projection shape {block.shape} != {expected_shape}: {path}")
+            projections[start:stop] = block
+        del volume_mu, block
+        gt, output_spacing = reconstruct_prior(
+            projections, geometry, angles, tool, **reconstruction_options,
+        )
+        del projections
+        # Direct source sampling is used only to retain the existing validity
+        # mask; the saved GT intensities come from the full-view FDK above.
+        sampled, mask_spacing, valid_mask = make_phase_gt(
+            image.dataobj, spacing, settings, polynomial, air_threshold, air_value,
+            return_valid_mask=True,
+        )
+        if gt.shape != valid_mask.shape or not np.allclose(
+            output_spacing, mask_spacing, rtol=0, atol=1e-5,
+        ):
+            raise ValueError(f"FDK GT grid differs from the source validity mask: {path}")
+        del sampled
+        gt[valid_mask == 0] = 0.0
         sparse_path = (
             reconstruction_dir / f"phase_{phase:02d}_reconstruction.nii.gz"
             if reconstruction_dir is not None else None
@@ -216,9 +313,10 @@ def process_series(
             ):
                 raise ValueError(f"GT shape or spacing differs from sparse reconstruction: {sparse_path}")
         save_image(gt, output_dir, f"phase_{phase:02d}_gt", output_spacing)
+        save_image(valid_mask, output_dir, f"phase_{phase:02d}_gt_valid_mask", output_spacing)
         phase_shapes[str(phase)] = list(gt.shape)
         print(f"  phase {phase:02d}: GT {gt.shape}", flush=True)
-        del image, gt
+        del image, gt, valid_mask
         gc.collect()
     return {
         "status": "complete",
@@ -227,6 +325,8 @@ def process_series(
         "volume_shape_zyx": list(source_shape),
         "original_voxel_spacing_mm_zyx": list(source_spacing),
         "gt_voxel_spacing_mm_zyx": list(output_spacing),
+        "gt_generation": GT_GENERATION,
+        "gt_views_per_phase": settings.n_projections,
         "phase_shapes_zyx": phase_shapes,
         "fov_shift_voxels_down_right": [
             settings.shift_down_voxels - settings.shift_up_voxels,
@@ -237,8 +337,9 @@ def process_series(
 
 
 def output_paths(output_dir: Path, phases: tuple[int, ...]) -> list[Path]:
-    return [output_dir / f"phase_{phase:02d}_gt{suffix}"
-            for phase in phases for suffix in (".tif", ".nii.gz")]
+    return [output_dir / f"phase_{phase:02d}_{stem}{suffix}"
+            for phase in phases for stem in ("gt", "gt_valid_mask")
+            for suffix in (".tif", ".nii.gz")]
 
 
 def signature(
@@ -246,6 +347,12 @@ def signature(
 ) -> dict[str, Any]:
     return {
         "settings": settings_signature(settings),
+        "gt_generation": GT_GENERATION,
+        "intensity_processing": INTENSITY_PROCESSING,
+        "source_out_of_bounds_value": 0.0,
+        "invalid_source_hu": SOURCE_PADDING_HU,
+        "invalid_attenuation_value": 0.0,
+        "valid_mask_rule": "all_interpolation_sources_valid_and_inside_output_fov",
         "calibration_csv": {
             "path": str(calibration_csv.resolve()),
             "sha256": hashlib.sha256(calibration_csv.read_bytes()).hexdigest(),
@@ -299,6 +406,7 @@ def main() -> int:
 
     calibration_path = args.calibration_csv.resolve()
     polynomial, air_threshold, air_value, calibration_details = load_attenuation_calibration(calibration_path)
+    calibration_details["air_threshold_applied"] = False
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     manifest_path = output_root / "manifest.json"
@@ -318,6 +426,7 @@ def main() -> int:
             if recon_config_path.is_file():
                 recon_config = json.loads(recon_config_path.read_text(encoding="utf-8"))
                 if (recon_config.get("settings") != settings_signature(settings)
+                        or recon_config.get("intensity_processing") != config["intensity_processing"]
                         or recon_config.get("calibration_csv") != config["calibration_csv"]):
                     raise ValueError(
                         f"Reconstruction settings or calibration differ from current GT inputs: {recon_config_path}"

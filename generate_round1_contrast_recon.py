@@ -59,6 +59,8 @@ DSO_MM = 750.0
 DSD_MM = 1250.0
 MIN_PHASE = 1
 MAX_PHASE = 11
+SOURCE_PADDING_HU = -2048.0
+INTENSITY_PROCESSING = "polynomial_valid_source_only_v2"
 
 
 @dataclass(frozen=True)
@@ -214,15 +216,26 @@ def phase_indices(
 
 
 def calibrated_volume(
-    hu: np.ndarray, polynomial: np.poly1d, air_threshold: float, air_value: float
+    hu: np.ndarray, polynomial: np.poly1d, air_threshold: float, air_value: float,
+    *, apply_air_threshold: bool = True,
 ) -> np.ndarray:
-    """Apply notebook attenuation calibration in slabs to limit peak RAM."""
+    """Calibrate measured CT voxels only; leave source padding at zero."""
     result = np.empty(hu.shape, dtype=np.float32)
     for start in range(0, hu.shape[0], 16):
         end = min(start + 16, hu.shape[0])
-        result[start:end] = calibrate_attenuation(
-            TigreTool.hu_to_mu(hu[start:end]), polynomial, air_threshold, air_value
-        )
+        source = np.asarray(hu[start:end], dtype=np.float32)
+        valid = source != SOURCE_PADDING_HU
+        destination = result[start:end]
+        destination.fill(0.0)
+        if not np.any(valid):
+            continue
+        volume_mu = TigreTool.hu_to_mu(source[valid])
+        if apply_air_threshold:
+            destination[valid] = calibrate_attenuation(
+                volume_mu, polynomial, air_threshold, air_value
+            )
+        else:
+            destination[valid] = polynomial(np.asarray(volume_mu, dtype=np.float64))
     return result
 
 
@@ -251,6 +264,9 @@ def configuration_signature(
 
     return {
         "settings": settings_signature(settings),
+        "intensity_processing": INTENSITY_PROCESSING,
+        "invalid_source_hu": SOURCE_PADDING_HU,
+        "invalid_attenuation_value": 0.0,
         "cycle_csv": source(cycle_csv),
         "calibration_csv": source(calibration_csv),
     }
@@ -327,7 +343,9 @@ def process_series(
         image_spacing = tuple(float(v) for v in image.metadata["header"].get_zooms()[:3])
         if hu.shape != volume_shape or not np.allclose(image_spacing, spacing, rtol=0, atol=1e-5):
             raise ValueError(f"Phase shape or spacing differs from first phase: {path}")
-        volume_mu = calibrated_volume(hu, polynomial, air_threshold, air_value)
+        volume_mu = calibrated_volume(
+            hu, polynomial, air_threshold, air_value, apply_air_threshold=False
+        )
         selected = indices_by_phase[phase]
         phase_projections = TigreTool.project_tigre(volume_mu, geometry, angles[selected])
         expected_shape = (len(selected), *settings.n_detector)
@@ -424,6 +442,7 @@ def main() -> int:
 
     calibration = load_attenuation_calibration(args.calibration_csv.resolve())
     polynomial, air_threshold, air_value, calibration_details = calibration
+    calibration_details["air_threshold_applied"] = False
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     manifest_path = output_root / "manifest.json"

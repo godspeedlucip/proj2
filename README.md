@@ -4,7 +4,7 @@ This is a copy of the Round contrast simulation pipeline. On the standalone
 `get_data` branch, these files are at the repository root.
 
 - `generate_round1_contrast_recon.py`: phase projections, full prior, and sparse FDK reconstructions.
-- `generate_round1_contrast_gt.py`: matched per-phase GT without projection or FDK.
+- `generate_round1_contrast_gt.py`: matched per-phase GT from full-angle projection and FDK of each phase CT.
 - `generate_pig_first_phase_prior.py`: shared attenuation calibration and reconstruction postprocessing.
 - `utils/` and `moni/`: copied implementations used by the scripts above.
 - `settings/`: snapshots of the six Round settings CSVs, `cycle.csv`, and `compare.csv`.
@@ -19,7 +19,10 @@ python generate_round1_contrast_gt.py --round-root data/pig/AHFP-Round-2 --setti
 ```
 
 Remove `--list` to generate data. Use the same settings and calibration CSVs for
-both commands so the GT matches the sparse reconstruction. No CT volumes or
+both commands so the GT matches the sparse reconstruction grid. Each GT uses
+all scan angles from its own phase, while the prior uses the phase-mixed scan
+and each sparse reconstruction uses only its assigned phase angles. TIGRE and
+a CUDA GPU are required for both generation commands. No CT volumes or
 generated output images are included in this branch. In the original local
 workspace, prefix script and settings paths in these examples with `get_data/`.
 
@@ -29,3 +32,16 @@ matrix size fixed. For example, Round 5 Control 1 uses `300` source pixels on
 a `256×256` output grid. Set `0` or omit the column for the original crop.
 The requested FOV must fit within the unpadded detector width. Run the
 reconstruction and GT with the same settings CSV so their grids match.
+
+Source CT voxels equal to exactly `-2048 HU` are treated as missing data. They
+are excluded from the HU-to-attenuation and `compare.csv` polynomial calls and
+are zero in the volumes passed to TIGRE. Other low-HU voxels, including valid
+air, retain the continuous polynomial calibration. GT uses the same rule and
+its reconstruction is zeroed outside the valid source sampling region. Each `phase_XX_gt` has a matching
+`phase_XX_gt_valid_mask.tif` and `.nii.gz`: value 1 means every interpolation
+source was valid and the voxel lies inside the output FOV; value 0 means it
+must be excluded from supervised loss or image metrics. Both files share the
+same shape and voxel spacing.
+
+When settings or calibration change, regenerate reconstruction before GT.
+The GT configuration signature invalidates older direct-sampling GT outputs.
