@@ -5,6 +5,7 @@ This is a copy of the Round contrast simulation pipeline. On the standalone
 
 - `generate_round1_contrast_recon.py`: phase projections, full prior, and sparse FDK reconstructions.
 - `generate_round1_contrast_gt.py`: matched per-phase GT from full-angle projection and FDK of each phase CT.
+- `generate_round1_contrast_mask.py`: annotated phase segmentation masks mapped to the GT/reconstruction grid.
 - `generate_pig_first_phase_prior.py`: shared attenuation calibration and reconstruction postprocessing.
 - `utils/` and `moni/`: copied implementations used by the scripts above.
 - `settings/`: snapshots of the six Round settings CSVs, `cycle.csv`, and `compare.csv`.
@@ -16,6 +17,7 @@ because the copied scripts retain defaults from their original workspace layout:
 ```powershell
 python generate_round1_contrast_recon.py --round-root data/pig/AHFP-Round-2 --settings-csv settings/round2_contrast_recon_settings.csv --cycle-csv settings/cycle.csv --calibration-csv settings/compare.csv --output-root outputs/round2_contrast_recon --list
 python generate_round1_contrast_gt.py --round-root data/pig/AHFP-Round-2 --settings-csv settings/round2_contrast_recon_settings.csv --calibration-csv settings/compare.csv --recon-root outputs/round2_contrast_recon --output-root outputs/round2_contrast_gt --list
+python generate_round1_contrast_mask.py --round-root data/pig/AHFP-Round-2 --settings-csv settings/round2_contrast_recon_settings.csv --recon-root outputs/round2_contrast_recon --gt-root outputs/round2_contrast_gt --output-root outputs/round2_contrast_mask --list
 ```
 
 Remove `--list` to generate data. Use the same settings and calibration CSVs for
@@ -45,3 +47,12 @@ same shape and voxel spacing.
 
 When settings or calibration change, regenerate reconstruction before GT.
 The GT configuration signature invalidates older direct-sampling GT outputs.
+
+For segmentation labels, remove `--list` from the mask command. Only CT phases
+with a matching `IMxxxxx_mask.nii.gz` are processed. The script preserves
+integer class IDs, checks source CT/mask alignment and any existing GT or
+reconstruction grid, and writes `phase_XX_mask.tif/.nii.gz`. Its default
+resampling is linear interpolation of each foreground class followed by a
+`0.5` score threshold; `--mask-resampling nearest` avoids interpolation, and
+`polynomial`/`cubic` select cubic B-spline interpolation. This label threshold
+does not affect the CT attenuation calibration described above.
