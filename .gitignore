@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.superpowers/
+tmp/
+papers/
+runs/
+*.raw
+*.dat
+*.pt
+*.jsonl
+*.npz
+*.tif
