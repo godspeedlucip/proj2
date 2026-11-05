@@ -37,7 +37,7 @@
 python train_prior_with_mask.py --stage base --base-train-list txt/sim_train_v2.txt --base-valid-list txt/sim_valid_v2.txt --output-dir runs/heart_mask --device cuda --batch-size 40 --num-workers 8
 ```
 
-基础阶段每轮随机抽取训练集约 10%，仅使用整图 MSE，完全忽略 mask。因此这里的 100 个循环约相当于每个样本平均参与 10 次，不等于完整遍历训练集 100 次。日志中的 `cumulative_samples_seen` 记录累计训练样本次数。`runs/heart_mask/base/latest.pt` 是第二阶段所有对照实验的共同初始化 checkpoint。完整验证集关闭随机强度缩放。训练器会更新 SophiaG 的曲率估计；这修正了旧训练脚本未调用 `update_hessian()` 的问题，因此与旧脚本的优化轨迹不完全一致。
+基础阶段每轮随机抽取训练集约 10%，仅使用整图 MSE，完全忽略 mask。因此这里的 100 个循环约相当于每个样本平均参与 10 次，不等于完整遍历训练集 100 次。日志中的 `cumulative_samples_seen` 记录累计训练样本次数。每轮分别保存 `runs/heart_mask/base/epoch_0001.pt` 等 checkpoint，并更新 `latest.pt`；后者是第二阶段所有对照实验的共同初始化 checkpoint。完整验证集关闭随机强度缩放。训练器会更新 SophiaG 的曲率估计；这修正了旧训练脚本未调用 `update_hessian()` 的问题，因此与旧脚本的优化轨迹不完全一致。
 
 若已有兼容 `Dense2D` 的旧 checkpoint，可跳过基础阶段，直接用 `--stage finetune --base-checkpoint <旧checkpoint路径>`。旧 checkpoint 至少需要 `state_dict` 字段。
 
@@ -60,7 +60,17 @@ python train_prior_with_mask.py --stage finetune --base-checkpoint runs/heart_ma
 
 E 组需额外传入正数 `--lambda-gradient`，例如先试 `0.01`。日志会记录未加权和加权的训练损失分项；据其实际量级调整系数，使训练初期加权梯度项约为整图 MSE 的 5%～20%。论文中的系数不能直接照搬到本项目的图像强度尺度。`boundary`、`gradient` 模式要求训练清单至少有一个明确标为 `1` 的精确 mask；未知质量不会触发边界项。
 
-第二阶段每轮遍历全部有 mask 训练样本，默认最多 50 轮，连续 8 轮目标验证指标没有改善则早停。进入第二阶段时重设随机种子，使 `both` 与单独运行 `finetune` 在相同基础 checkpoint 和参数下使用相同的抽样随机流。微调使用新建的优化器；checkpoint 的 `config` 保存基础 checkpoint 的绝对路径和 SHA-256。每组写入 `latest.pt`、`best.pt` 和 `metrics.jsonl`；已有同名 checkpoint 时程序拒绝覆盖，重新实验请使用新的输出目录。
+第二阶段每轮遍历全部有 mask 训练样本，默认最多 50 轮，连续 8 轮目标验证指标没有改善则早停。进入第二阶段时重设随机种子，使 `both` 与单独运行 `finetune` 在相同基础 checkpoint 和参数下使用相同的抽样随机流。微调使用新建的优化器；checkpoint 的 `config` 保存基础 checkpoint 的绝对路径和 SHA-256。每轮保存 `finetune/<模式>/epoch_0001.pt` 等文件，同时更新 `latest.pt`；指标改善时更新 `best.pt`。继续写入同一目录必须使用 `--resume-checkpoint`，重新实验请使用新的输出目录。
+
+### 从中断的训练继续
+
+使用原命令及相同的数据清单、随机种子、batch 大小、worker 数、学习率和损失参数，增加 `--resume-checkpoint` 指向对应阶段的 `latest.pt`。例如基础阶段完成第 12 轮后继续到第 100 轮：
+
+```text
+python train_prior_with_mask.py --stage base --base-train-list txt/sim_train_v2.txt --base-valid-list txt/sim_valid_v2.txt --output-dir runs/heart_mask --device cuda --batch-size 40 --num-workers 8 --base-epochs 100 --resume-checkpoint runs/heart_mask/base/latest.pt
+```
+
+微调阶段同理使用 `--stage finetune --resume-checkpoint runs/heart_mask/finetune/boundary/latest.pt`，并保留原来的验证清单、mask 训练清单及 `--loss-mode boundary` 等参数；恢复微调时不再需要 `--base-checkpoint`。`--base-epochs` 或 `--finetune-epochs` 可以增加到新的总轮数。checkpoint 会恢复模型、优化器、学习率调度器、随机数状态、累计样本数或早停状态，从下一轮开始；旧版仅有 `state_dict` 的文件只能用于初始化微调，不能完整恢复训练。若要从较早的 `epoch_XXXX.pt` 分叉，使用新的输出目录，避免覆盖原实验后续轮次。
 
 ## 4. 判断结果
 

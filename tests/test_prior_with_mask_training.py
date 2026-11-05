@@ -291,3 +291,71 @@ def test_both_and_standalone_finetune_reproduce_and_record_source(tmp_path, monk
     saved = torch.load(both / "finetune/boundary/latest.pt", weights_only=False)
     assert saved["config"]["base_checkpoint_sha256"] == hashlib.sha256(base_path.read_bytes()).hexdigest()
     assert saved["config"]["base_checkpoint_path"] == str(base_path.resolve())
+
+
+def test_base_keeps_each_epoch_and_resume_matches_uninterrupted_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(training, "Dense2D", TinyTwoInput)
+    sample_path = tmp_path / "case01_p0_slice0.npz"
+    np.savez(sample_path, input=np.zeros((7, 7), dtype=np.float32),
+             prior=np.zeros((7, 7), dtype=np.float32),
+             label=np.ones((7, 7), dtype=np.float32))
+    train_list = tmp_path / "train.txt"
+    valid_list = tmp_path / "valid.txt"
+    train_list.write_text((str(sample_path) + "\n") * 10, encoding="utf-8")
+    valid_list.write_text(str(sample_path) + "\n", encoding="utf-8")
+    common = ["--stage", "base", "--base-train-list", str(train_list),
+              "--base-valid-list", str(valid_list), "--device", "cpu",
+              "--num-workers", "0", "--batch-size", "1", "--seed", "7"]
+    continuous = tmp_path / "continuous"
+    resumed = tmp_path / "resumed"
+    training.main([*common, "--output-dir", str(continuous), "--base-epochs", "3"])
+    training.main([*common, "--output-dir", str(resumed), "--base-epochs", "1"])
+    first = resumed / "base/epoch_0001.pt"
+    assert first.exists()
+    training.main([*common, "--output-dir", str(resumed), "--base-epochs", "3",
+                   "--resume-checkpoint", str(resumed / "base/latest.pt")])
+    for epoch in (1, 2, 3):
+        saved = torch.load(resumed / f"base/epoch_{epoch:04d}.pt", weights_only=False)
+        assert saved["epoch"] == epoch
+    final = torch.load(resumed / "base/latest.pt", weights_only=False)
+    reference = torch.load(continuous / "base/latest.pt", weights_only=False)
+    assert final["epoch"] == 3
+    assert final["state_dict"]["bias"].item() == reference["state_dict"]["bias"].item()
+    assert final["lr_scheduler"] == reference["lr_scheduler"]
+    assert final["training_state"]["cumulative_samples_seen"] == 3
+    rows = [json.loads(line) for line in (resumed / "base/metrics.jsonl").read_text().splitlines()]
+    assert [row["epoch"] for row in rows] == [1, 2, 3]
+
+
+def test_finetune_resume_restores_early_stopping_and_keeps_epochs(tmp_path, monkeypatch):
+    monkeypatch.setattr(training, "Dense2D", TinyTwoInput)
+    sample_path = tmp_path / "case01_p0_slice0.npz"
+    mask = np.zeros((7, 7), dtype=np.uint8)
+    mask[2:5, 2:5] = 1
+    np.savez(sample_path, input=np.zeros((7, 7), dtype=np.float32),
+             prior=np.zeros((7, 7), dtype=np.float32),
+             label=np.ones((7, 7), dtype=np.float32), mask=mask,
+             mask_quality=np.array(1, dtype=np.int8))
+    sample_list = tmp_path / "samples.txt"
+    sample_list.write_text(str(sample_path) + "\n", encoding="utf-8")
+    base_checkpoint = tmp_path / "base.pt"
+    torch.save({"state_dict": TinyTwoInput().state_dict()}, base_checkpoint)
+    output = tmp_path / "output"
+    common = ["--stage", "finetune", "--base-valid-list", str(sample_list),
+              "--masked-train-list", str(sample_list), "--masked-valid-list", str(sample_list),
+              "--output-dir", str(output), "--device", "cpu", "--num-workers", "0",
+              "--batch-size", "1", "--loss-mode", "roi", "--finetune-lr", "0",
+              "--patience", "2", "--seed", "7"]
+    training.main([*common, "--base-checkpoint", str(base_checkpoint),
+                   "--finetune-epochs", "2"])
+    latest = output / "finetune/roi/latest.pt"
+    assert torch.load(latest, weights_only=False)["training_state"]["stale"] == 1
+    training.main([*common, "--finetune-epochs", "5",
+                   "--resume-checkpoint", str(latest)])
+    saved_dir = output / "finetune/roi"
+    assert [p.name for p in sorted(saved_dir.glob("epoch_*.pt"))] == [
+        "epoch_0001.pt", "epoch_0002.pt", "epoch_0003.pt"]
+    assert torch.load(saved_dir / "latest.pt", weights_only=False)["epoch"] == 3
+    assert torch.load(saved_dir / "best.pt", weights_only=False)["epoch"] == 1
+    rows = [json.loads(line) for line in (saved_dir / "metrics.jsonl").read_text().splitlines()]
+    assert [row["epoch"] for row in rows] == [1, 2, 3]

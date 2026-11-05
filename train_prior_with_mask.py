@@ -204,7 +204,7 @@ def load_model_weights(model, checkpoint_path, device):
 
 
 def save_checkpoint(path, model, optimizer, scheduler, *, epoch, stage, loss_mode,
-                    config, validation_metrics):
+                    config, validation_metrics, training_state=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     state = {
@@ -216,10 +216,59 @@ def save_checkpoint(path, model, optimizer, scheduler, *, epoch, stage, loss_mod
         "loss_mode": loss_mode,
         "config": config,
         "validation_metrics": validation_metrics,
+        "training_state": training_state or {},
+        "rng_state": {
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+            "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        },
     }
     temporary = path.with_suffix(path.suffix + ".tmp")
     torch.save(state, temporary)
     os.replace(temporary, path)
+
+
+def restore_training_checkpoint(path, model, optimizer, scheduler, *, stage, config, device):
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    if checkpoint.get("stage") != stage:
+        raise ValueError(f"resume checkpoint must be from {stage} stage")
+    if stage == "finetune" and checkpoint.get("loss_mode") != config["loss_mode"]:
+        raise ValueError("resume checkpoint loss mode does not match")
+    keys = ["base_valid_list", "seed", "batch_size", "num_workers"]
+    if stage == "base":
+        keys += ["base_train_list", "base_lr"]
+    else:
+        keys += ["masked_train_list", "masked_valid_list", "finetune_lr", "patience",
+                 "loss_mode", "lambda_exact", "lambda_rough", "lambda_boundary",
+                 "lambda_gradient", "boundary_radius", "rough_sigma", "mask_labels"]
+    previous = checkpoint.get("config", {})
+    changed = [key for key in keys if previous.get(key) != config.get(key)]
+    if changed:
+        raise ValueError(f"resume configuration differs: {', '.join(changed)}")
+    if not all(key in checkpoint for key in ("optimizer_state_dict", "lr_scheduler", "rng_state")):
+        raise ValueError("checkpoint lacks optimizer, scheduler, or RNG state required for resume")
+    model.load_state_dict(checkpoint["state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    scheduler.load_state_dict(checkpoint["lr_scheduler"])
+    state = checkpoint["rng_state"]
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"].cpu())
+    if state["cuda"] is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["cuda"])
+    return checkpoint
+
+
+def save_epoch_checkpoints(directory, model, optimizer, scheduler, *, epoch, stage,
+                           loss_mode, config, validation_metrics, training_state):
+    epoch_path = directory / f"epoch_{epoch:04d}.pt"
+    if epoch_path.exists():
+        raise FileExistsError(f"epoch checkpoint exists: {epoch_path}")
+    fields = dict(epoch=epoch, stage=stage, loss_mode=loss_mode, config=config,
+                  validation_metrics=validation_metrics, training_state=training_state)
+    save_checkpoint(epoch_path, model, optimizer, scheduler, **fields)
+    save_checkpoint(directory / "latest.pt", model, optimizer, scheduler, **fields)
 
 
 def _loader(dataset, *, batch_size, num_workers, shuffle=False):
@@ -245,6 +294,8 @@ def _make_parser():
     parser.add_argument("--mask-labels-file", type=Path,
                         help="JSON array of positive mask labels to include; default: all values > 0")
     parser.add_argument("--base-checkpoint")
+    parser.add_argument("--resume-checkpoint", type=Path,
+                        help="resume at the next epoch using a saved base or finetune checkpoint")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=42)
@@ -275,7 +326,7 @@ def main(argv=None):
         parser.error("--base-train-list is required for base and both")
     if args.stage in {"finetune", "both"} and not (args.masked_train_list and args.masked_valid_list):
         parser.error("--masked-train-list and --masked-valid-list are required for finetune and both")
-    if args.stage == "finetune" and not args.base_checkpoint:
+    if args.stage == "finetune" and not (args.base_checkpoint or args.resume_checkpoint):
         parser.error("--base-checkpoint is required for finetune")
     if args.loss_mode == "gradient" and args.lambda_gradient <= 0:
         parser.error("--lambda-gradient must be positive for gradient mode")
@@ -290,6 +341,23 @@ def main(argv=None):
     config = vars(args).copy()
     config["mask_labels_file"] = str(args.mask_labels_file.resolve()) if args.mask_labels_file else None
     config["mask_labels"] = mask_labels
+    resume_stage = None
+    if args.resume_checkpoint:
+        resume_header = torch.load(args.resume_checkpoint, map_location="cpu", weights_only=False)
+        resume_stage = resume_header.get("stage")
+        if resume_stage not in ({"base"} if args.stage == "base" else
+                                {"finetune"} if args.stage == "finetune" else
+                                {"base", "finetune"}):
+            raise ValueError("resume checkpoint stage does not match requested stage")
+        if resume_stage == "finetune" and args.stage == "both" and not args.base_train_list:
+            raise ValueError("--base-train-list is required for --stage both")
+        checkpoint_dir = (output / "base" if resume_stage == "base" else
+                          output / "finetune" / args.loss_mode)
+        latest = checkpoint_dir / "latest.pt"
+        if latest.exists() and latest.resolve() != args.resume_checkpoint.resolve():
+            latest_epoch = torch.load(latest, map_location="cpu", weights_only=False)["epoch"]
+            if latest_epoch != resume_header["epoch"]:
+                raise ValueError("output has a different latest epoch; use a new output directory")
     loss_config = {
         "mode": args.loss_mode,
         "radius": args.boundary_radius,
@@ -305,15 +373,23 @@ def main(argv=None):
     full_validation_loader = _loader(full_validation, batch_size=args.batch_size,
                                      num_workers=args.num_workers)
 
-    if args.stage in {"base", "both"}:
+    if args.stage in {"base", "both"} and resume_stage != "finetune":
         base_output = output / "base"
-        if (base_output / "latest.pt").exists():
+        if not args.resume_checkpoint and ((base_output / "latest.pt").exists()
+                                           or any(base_output.glob("epoch_*.pt"))):
             raise FileExistsError(f"base checkpoint exists: {base_output / 'latest.pt'}")
         base_dataset = npz_reader_2d_data_with_prior(args.base_train_list, training=True)
         optimizer = SophiaG(model.parameters(), lr=args.base_lr)
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=2, gamma=0.95)
         cumulative_samples_seen = 0
-        for epoch in range(1, args.base_epochs + 1):
+        start_epoch = 1
+        if resume_stage == "base":
+            restored = restore_training_checkpoint(args.resume_checkpoint, model, optimizer,
+                                                   scheduler, stage="base", config=config,
+                                                   device=device)
+            start_epoch = restored["epoch"] + 1
+            cumulative_samples_seen = restored["training_state"].get("cumulative_samples_seen", 0)
+        for epoch in range(start_epoch, args.base_epochs + 1):
             subset = Subset(base_dataset, stage_indices(len(base_dataset), "base", seed=args.seed, epoch=epoch))
             train_loader = _loader(subset, batch_size=args.batch_size, num_workers=args.num_workers,
                                    shuffle=True)
@@ -327,21 +403,28 @@ def main(argv=None):
                       "valid_full": valid_metrics,
                       "cumulative_samples_seen": cumulative_samples_seen}
             _log_epoch(base_output, record)
-            save_checkpoint(base_output / "latest.pt", model, optimizer, scheduler,
-                            epoch=epoch, stage="base", loss_mode="full", config=config,
-                            validation_metrics=valid_metrics)
+            save_epoch_checkpoints(base_output, model, optimizer, scheduler,
+                                   epoch=epoch, stage="base", loss_mode="full", config=config,
+                                   validation_metrics=valid_metrics,
+                                   training_state={"cumulative_samples_seen": cumulative_samples_seen})
         base_checkpoint = base_output / "latest.pt"
     else:
-        base_checkpoint = Path(args.base_checkpoint)
+        base_checkpoint = Path(args.base_checkpoint) if args.base_checkpoint else None
 
     if args.stage in {"finetune", "both"}:
         finetune_output = output / "finetune" / args.loss_mode
-        if (finetune_output / "best.pt").exists() or (finetune_output / "latest.pt").exists():
+        if resume_stage != "finetune" and ((finetune_output / "best.pt").exists()
+                                           or (finetune_output / "latest.pt").exists()
+                                           or any(finetune_output.glob("epoch_*.pt"))):
             raise FileExistsError(f"finetune checkpoint exists: {finetune_output}")
-        load_model_weights(model, base_checkpoint, device)
-        config["base_checkpoint_path"] = str(base_checkpoint.resolve())
-        config["base_checkpoint_sha256"] = checkpoint_sha256(base_checkpoint)
-        seed_everything(args.seed + 1000003)
+        if resume_stage != "finetune":
+            load_model_weights(model, base_checkpoint, device)
+            config["base_checkpoint_path"] = str(base_checkpoint.resolve())
+            config["base_checkpoint_sha256"] = checkpoint_sha256(base_checkpoint)
+            seed_everything(args.seed + 1000003)
+        else:
+            config["base_checkpoint_path"] = resume_header["config"].get("base_checkpoint_path")
+            config["base_checkpoint_sha256"] = resume_header["config"].get("base_checkpoint_sha256")
         masked_train = npz_reader_2d_data_with_prior(
             args.masked_train_list, training=True, require_mask=True, mask_labels=mask_labels
         )
@@ -366,7 +449,17 @@ def main(argv=None):
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=2, gamma=0.95)
         best = float("inf")
         stale = 0
-        for epoch in range(1, args.finetune_epochs + 1):
+        start_epoch = 1
+        if resume_stage == "finetune":
+            restored = restore_training_checkpoint(args.resume_checkpoint, model, optimizer,
+                                                   scheduler, stage="finetune", config=config,
+                                                   device=device)
+            start_epoch = restored["epoch"] + 1
+            best = restored["training_state"]["best_score"]
+            stale = restored["training_state"]["stale"]
+        for epoch in range(start_epoch, args.finetune_epochs + 1):
+            if stale >= args.patience:
+                break
             train_loader = _loader(masked_train, batch_size=args.batch_size,
                                    num_workers=args.num_workers, shuffle=True)
             train_metrics = train_epoch(model, train_loader, optimizer, stage="finetune",
@@ -382,19 +475,24 @@ def main(argv=None):
                       "valid_masked": masked_metrics, "selection_metric": score_name,
                       "boundary_assessed": bool(masked_metrics["exact_count"])}
             _log_epoch(finetune_output, record)
-            save_checkpoint(finetune_output / "latest.pt", model, optimizer, scheduler,
-                            epoch=epoch, stage="finetune", loss_mode=args.loss_mode,
-                            config=config, validation_metrics=record)
             if score < best:
                 best = score
                 stale = 0
-                save_checkpoint(finetune_output / "best.pt", model, optimizer, scheduler,
-                                epoch=epoch, stage="finetune", loss_mode=args.loss_mode,
-                                config=config, validation_metrics=record)
+                improved = True
             else:
                 stale += 1
-                if stale >= args.patience:
-                    break
+                improved = False
+            save_epoch_checkpoints(finetune_output, model, optimizer, scheduler,
+                                   epoch=epoch, stage="finetune", loss_mode=args.loss_mode,
+                                   config=config, validation_metrics=record,
+                                   training_state={"best_score": best, "stale": stale})
+            if improved:
+                save_checkpoint(finetune_output / "best.pt", model, optimizer, scheduler,
+                                epoch=epoch, stage="finetune", loss_mode=args.loss_mode,
+                                config=config, validation_metrics=record,
+                                training_state={"best_score": best, "stale": stale})
+            if stale >= args.patience:
+                break
 
 
 if __name__ == "__main__":
