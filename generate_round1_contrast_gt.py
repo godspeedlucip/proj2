@@ -2,7 +2,8 @@
 
 The output grid follows ``generate_round1_contrast_recon.py``: the same
 per-series geometry, source-voxel FOV shift, circular FOV mask, 256-pixel
-transverse crop or resize, voxel spacing, and TIFF/NIfTI formats. Each
+  transverse crop or resize and voxel spacing. The CLI saves TIFF by default;
+  NIfTI or both formats can be selected explicitly. Each
 phase CT is projected over the complete scan and reconstructed on its own;
 the prior instead reconstructs the phase-mixed scan. Output names are ``phase_XX_gt`` under
 ``outputs/round1_contrast_gt/<series>``.
@@ -45,13 +46,33 @@ from generate_round1_contrast_recon import (
     select_series,
     settings_signature,
 )
-from utils.tool import TigreTool
+from utils.tool import MedicalImageTool, TigreTool
 
 
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "outputs" / "round1_contrast_gt"
 DEFAULT_RECON_ROOT = REPO_ROOT / "outputs" / "round1_contrast_recon"
 PROJECTION_BATCH_SIZE = 64
 GT_GENERATION = "single_phase_full_angle_fdk_v1"
+OUTPUT_SUFFIXES = {
+    "tif": (".tif",),
+    "nii": (".nii.gz",),
+    "both": (".tif", ".nii.gz"),
+}
+
+
+def save_gt_image(
+    image: np.ndarray, output_dir: Path, stem: str,
+    spacing: tuple[float, ...], output_format: str,
+) -> None:
+    """Save the requested GT format, retaining the legacy dual-format hook."""
+    if output_format == "both":
+        save_image(image, output_dir, stem, spacing)
+    elif output_format == "tif":
+        MedicalImageTool.save(image, output_dir / f"{stem}.tif")
+    elif output_format == "nii":
+        MedicalImageTool.save(image, output_dir / f"{stem}.nii.gz", voxel_spacing=spacing)
+    else:
+        raise ValueError(f"Unknown output format: {output_format}")
 
 
 def phase_grid(
@@ -231,9 +252,12 @@ def process_series(
     settings: SeriesSettings,
     *,
     reconstruction_dir: Path | None = None,
+    output_format: str = "both",
 ) -> dict[str, Any]:
     """Project and FDK each phase using all scan angles, then save its GT pair."""
     settings.validate()
+    if output_format not in OUTPUT_SUFFIXES:
+        raise ValueError(f"Unknown output format: {output_format}")
     phase_shapes: dict[str, list[int]] = {}
     source_shape = None
     source_spacing = None
@@ -312,8 +336,8 @@ def process_series(
                 sparse_spacing, output_spacing, rtol=0, atol=1e-5
             ):
                 raise ValueError(f"GT shape or spacing differs from sparse reconstruction: {sparse_path}")
-        save_image(gt, output_dir, f"phase_{phase:02d}_gt", output_spacing)
-        save_image(valid_mask, output_dir, f"phase_{phase:02d}_gt_valid_mask", output_spacing)
+        save_gt_image(gt, output_dir, f"phase_{phase:02d}_gt", output_spacing, output_format)
+        save_gt_image(valid_mask, output_dir, f"phase_{phase:02d}_gt_valid_mask", output_spacing, output_format)
         phase_shapes[str(phase)] = list(gt.shape)
         print(f"  phase {phase:02d}: GT {gt.shape}", flush=True)
         del image, gt, valid_mask
@@ -326,6 +350,7 @@ def process_series(
         "original_voxel_spacing_mm_zyx": list(source_spacing),
         "gt_voxel_spacing_mm_zyx": list(output_spacing),
         "gt_generation": GT_GENERATION,
+        "output_format": output_format,
         "gt_views_per_phase": settings.n_projections,
         "phase_shapes_zyx": phase_shapes,
         "fov_shift_voxels_down_right": [
@@ -336,18 +361,22 @@ def process_series(
     }
 
 
-def output_paths(output_dir: Path, phases: tuple[int, ...]) -> list[Path]:
+def output_paths(
+    output_dir: Path, phases: tuple[int, ...], output_format: str = "both",
+) -> list[Path]:
     return [output_dir / f"phase_{phase:02d}_{stem}{suffix}"
             for phase in phases for stem in ("gt", "gt_valid_mask")
-            for suffix in (".tif", ".nii.gz")]
+            for suffix in OUTPUT_SUFFIXES[output_format]]
 
 
 def signature(
-    settings: SeriesSettings, calibration_csv: Path, phase_paths: dict[int, Path]
+    settings: SeriesSettings, calibration_csv: Path, phase_paths: dict[int, Path],
+    output_format: str = "both",
 ) -> dict[str, Any]:
     return {
         "settings": settings_signature(settings),
         "gt_generation": GT_GENERATION,
+        "output_format": output_format,
         "intensity_processing": INTENSITY_PROCESSING,
         "source_out_of_bounds_value": 0.0,
         "invalid_source_hu": SOURCE_PADDING_HU,
@@ -366,7 +395,9 @@ def signature(
 
 
 def outputs_current(output_dir: Path, phases: tuple[int, ...], config: dict[str, Any]) -> bool:
-    if not all(path.is_file() and path.stat().st_size > 0 for path in output_paths(output_dir, phases)):
+    output_format = config.get("output_format", "both")
+    if not all(path.is_file() and path.stat().st_size > 0
+               for path in output_paths(output_dir, phases, output_format)):
         return False
     config_path = output_dir / "gt_config.json"
     try:
@@ -379,9 +410,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--round-root", type=Path, default=DEFAULT_ROUND_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    parser.add_argument("--recon-root", type=Path, default=DEFAULT_RECON_ROOT)
+    parser.add_argument("--recon-root", type=Path, default=None,
+                        help="Optional reconstruction directory to verify against.")
     parser.add_argument("--calibration-csv", type=Path, default=REPO_ROOT.parent / "compare.csv")
     parser.add_argument("--settings-csv", type=Path, default=DEFAULT_SETTINGS_CSV)
+    parser.add_argument("--output-format", choices=tuple(OUTPUT_SUFFIXES), default="tif",
+                        help="GT file format (default: tif).")
     parser.add_argument("--series", nargs="+", metavar="NAME",
                         help="Pig IDs or relative series paths (space or comma separated).")
     parser.add_argument("--list", action="store_true", help="List source series without generating GT.")
@@ -418,19 +452,22 @@ def main() -> int:
     for directory, phase_paths in series:
         relative = directory.relative_to(round_root)
         destination = output_root / relative
-        reconstruction_dir = args.recon_root.resolve() / relative
+        reconstruction_dir = (args.recon_root.resolve() / relative
+                              if args.recon_root is not None else None)
         settings = settings_by_series[relative.as_posix()]
         try:
-            config = signature(settings, calibration_path, phase_paths)
-            recon_config_path = reconstruction_dir / "reconstruction_config.json"
-            if recon_config_path.is_file():
-                recon_config = json.loads(recon_config_path.read_text(encoding="utf-8"))
-                if (recon_config.get("settings") != settings_signature(settings)
-                        or recon_config.get("intensity_processing") != config["intensity_processing"]
-                        or recon_config.get("calibration_csv") != config["calibration_csv"]):
-                    raise ValueError(
-                        f"Reconstruction settings or calibration differ from current GT inputs: {recon_config_path}"
-                    )
+            config = signature(settings, calibration_path, phase_paths,
+                               output_format=args.output_format)
+            if reconstruction_dir is not None:
+                recon_config_path = reconstruction_dir / "reconstruction_config.json"
+                if recon_config_path.is_file():
+                    recon_config = json.loads(recon_config_path.read_text(encoding="utf-8"))
+                    if (recon_config.get("settings") != settings_signature(settings)
+                            or recon_config.get("intensity_processing") != config["intensity_processing"]
+                            or recon_config.get("calibration_csv") != config["calibration_csv"]):
+                        raise ValueError(
+                            f"Reconstruction settings or calibration differ from current GT inputs: {recon_config_path}"
+                        )
             if not args.overwrite and outputs_current(destination, tuple(phase_paths), config):
                 record: dict[str, Any] = {"status": "skipped_existing"}
             else:
@@ -439,6 +476,7 @@ def main() -> int:
                     directory, phase_paths, destination,
                     polynomial, air_threshold, air_value, settings,
                     reconstruction_dir=reconstruction_dir,
+                    output_format=args.output_format,
                 )
                 (destination / "gt_config.json").write_text(
                     json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"

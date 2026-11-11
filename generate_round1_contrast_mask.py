@@ -42,10 +42,12 @@ from generate_round1_contrast_gt import phase_grid  # noqa: E402
 from generate_round1_contrast_recon import (  # noqa: E402
     DEFAULT_ROUND_ROOT,
     DEFAULT_SETTINGS_CSV,
+    OUTPUT_SUFFIXES,
     SeriesSettings,
     discover_series,
     load_series_settings,
     save_image,
+    save_selected_image,
     select_series,
     settings_signature,
 )
@@ -235,6 +237,14 @@ def make_phase_mask(
 
 def _check_partner(path: Path, mask: np.ndarray, spacing, label: str) -> None:
     if not path.is_file():
+        tif_path = path.with_name(path.name[:-7] + ".tif")
+        if not tif_path.is_file():
+            return
+        import tifffile
+        with tifffile.TiffFile(tif_path) as tif:
+            shape = tuple(int(v) for v in tif.series[0].shape)
+        if shape != mask.shape:
+            raise ValueError(f"{label} shape differs from generated mask: {tif_path}")
         return
     image = nib.load(str(path))
     if image.shape != mask.shape or not np.allclose(image.header.get_zooms()[:3], spacing, atol=1e-5):
@@ -256,12 +266,14 @@ def process_series(
     phase: int | None = None,
     resampling: str = "linear",
     threshold: float = 0.5,
+    output_format: str = "both",
 ) -> dict[str, Any]:
+    if output_format not in OUTPUT_SUFFIXES:
+        raise ValueError(f"Unknown output format: {output_format}")
     masks = source_masks(series_dir, ct_paths, phase)
     if not masks:
         return {"status": "no_source_masks", "source_directory": str(series_dir), "phases": {}}
-    planned = [output_dir / f"phase_{phase:02d}_mask{suffix}"
-               for phase in masks for suffix in (".tif", ".nii.gz")]
+    planned = output_paths(output_dir, tuple(masks), output_format)
     if not overwrite and any(path.exists() for path in planned):
         raise FileExistsError(f"Mask output exists in {output_dir}; choose a new directory or use --overwrite")
     records = {}
@@ -279,7 +291,8 @@ def process_series(
             _check_partner(recon_dir / f"phase_{phase:02d}_reconstruction.nii.gz", mask, spacing, "Reconstruction")
         labels, counts = np.unique(mask, return_counts=True)
         output_dir.mkdir(parents=True, exist_ok=True)
-        save_image(mask, output_dir, f"phase_{phase:02d}_mask", spacing)
+        save_selected_image(mask, output_dir, f"phase_{phase:02d}_mask",
+                            spacing, output_format)
         records[str(phase)] = {
             "source_ct": str(ct_paths[phase]), "source_mask": str(mask_path),
             "source_shape_zyx": list(ct.shape),
@@ -293,21 +306,26 @@ def process_series(
         print(f"  phase {phase:02d}: {mask.shape}, labels={records[str(phase)]['label_counts']}", flush=True)
         del ct, original, mask
         gc.collect()
-    return {"status": "complete", "source_directory": str(series_dir), "phases": records}
+    return {"status": "complete", "source_directory": str(series_dir),
+            "output_format": output_format, "phases": records}
 
 
-def output_paths(output_dir: Path, phases: tuple[int, ...]) -> list[Path]:
+def output_paths(
+    output_dir: Path, phases: tuple[int, ...], output_format: str = "both",
+) -> list[Path]:
     return [output_dir / f"phase_{phase:02d}_mask{suffix}"
-            for phase in phases for suffix in (".tif", ".nii.gz")]
+            for phase in phases for suffix in OUTPUT_SUFFIXES[output_format]]
 
 
 def signature(settings: SeriesSettings, masks: dict[int, Path], ct_paths: dict[int, Path],
-              resampling: str = "linear", threshold: float = 0.5) -> dict[str, Any]:
+              resampling: str = "linear", threshold: float = 0.5,
+              output_format: str = "both") -> dict[str, Any]:
     def identity(path: Path) -> dict[str, Any]:
         stat = path.stat()
         return {"path": str(path.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
     return {
         "settings": settings_signature(settings),
+        "output_format": output_format,
         "label_policy": "preserve_integer_source_classes",
         "mask_interpolation": resampling,
         "mask_threshold": threshold if resampling != "nearest" else None,
@@ -318,7 +336,8 @@ def signature(settings: SeriesSettings, masks: dict[int, Path], ct_paths: dict[i
 
 
 def outputs_current(output_dir: Path, phases: tuple[int, ...], config: dict[str, Any]) -> bool:
-    if not all(path.is_file() and path.stat().st_size > 0 for path in output_paths(output_dir, phases)):
+    if not all(path.is_file() and path.stat().st_size > 0
+               for path in output_paths(output_dir, phases, config.get("output_format", "both"))):
         return False
     try:
         return json.loads((output_dir / "mask_config.json").read_text(encoding="utf-8")) == config
@@ -330,9 +349,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--round-root", type=Path, default=DEFAULT_ROUND_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    parser.add_argument("--gt-root", type=Path, default=DEFAULT_GT_ROOT)
-    parser.add_argument("--recon-root", type=Path, default=DEFAULT_RECON_ROOT)
+    parser.add_argument("--gt-root", type=Path, default=None,
+                        help="Optional GT directory to verify against.")
+    parser.add_argument("--recon-root", type=Path, default=None,
+                        help="Optional reconstruction directory to verify against.")
     parser.add_argument("--settings-csv", type=Path, default=DEFAULT_SETTINGS_CSV)
+    parser.add_argument("--output-format", choices=tuple(OUTPUT_SUFFIXES), default="tif",
+                        help="Mask file format (default: tif).")
     parser.add_argument("--series", nargs="+", metavar="NAME",
                         help="Pig ID or relative series path; may list several")
     parser.add_argument("--phase", type=int, help="Only this annotated source phase")
@@ -376,18 +399,22 @@ def main() -> int:
                 record = {"status": "no_source_masks", "phases": {}}
             else:
                 config = signature(settings, masks, ct_paths,
-                                   args.mask_resampling, args.mask_threshold)
+                                   args.mask_resampling, args.mask_threshold,
+                                   output_format=args.output_format)
                 if outputs_current(destination, tuple(masks), config) and not args.overwrite:
                     record = {"status": "skipped_existing", "phases": tuple(masks)}
                 else:
                     record = process_series(
                         directory, ct_paths, destination, settings,
-                        gt_dir=args.gt_root.resolve() / relative,
-                        recon_dir=args.recon_root.resolve() / relative,
+                        gt_dir=(args.gt_root.resolve() / relative
+                                if args.gt_root is not None else None),
+                        recon_dir=(args.recon_root.resolve() / relative
+                                   if args.recon_root is not None else None),
                         overwrite=args.overwrite,
                         phase=args.phase,
                         resampling=args.mask_resampling,
                         threshold=args.mask_threshold,
+                        output_format=args.output_format,
                     )
                     (destination / "mask_config.json").write_text(
                         json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"

@@ -18,6 +18,8 @@ Run with ``--list`` to inspect inputs without TIGRE or GPU work. For example,
 ``--series Stent_2_7596 --list`` previews one pig, and
 ``--series Stent_2_7596`` reconstructs only that pig. Changing its CSV row
 automatically invalidates prior outputs for that series.
+ The CLI saves only TIFF by default; use --output-format nii or both to
+ request NIfTI files.
 """
 
 from __future__ import annotations
@@ -48,6 +50,11 @@ DEFAULT_ROUND_ROOT = REPO_ROOT / "data" / "pig" / "AHFP-Round-1"
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "outputs" / "round1_contrast_recon"
 DEFAULT_SETTINGS_CSV = REPO_ROOT / "data" / "round1_contrast_recon_settings.csv"
 PHASE_NAME = re.compile(r"IM(\d+)_ct\.nii\.gz", re.IGNORECASE)
+OUTPUT_SUFFIXES = {
+    "tif": (".tif",),
+    "nii": (".nii.gz",),
+    "both": (".tif", ".nii.gz"),
+}
 
 # Geometry and acquisition settings from the notebook's dynamic prior section.
 N_PROJECTIONS = 600
@@ -239,9 +246,12 @@ def calibrated_volume(
     return result
 
 
-def output_paths(output_dir: Path, labels: tuple[int, ...]) -> list[Path]:
+def output_paths(
+    output_dir: Path, labels: tuple[int, ...], output_format: str = "both",
+) -> list[Path]:
     stems = ["prior_image"] + [f"phase_{phase:02d}_reconstruction" for phase in labels]
-    return [output_dir / f"{stem}{suffix}" for stem in stems for suffix in (".tif", ".nii.gz")]
+    return [output_dir / f"{stem}{suffix}" for stem in stems
+            for suffix in OUTPUT_SUFFIXES[output_format]]
 
 
 def settings_signature(settings: SeriesSettings) -> dict[str, Any]:
@@ -253,7 +263,8 @@ def settings_signature(settings: SeriesSettings) -> dict[str, Any]:
 
 
 def configuration_signature(
-    settings: SeriesSettings, cycle_csv: Path, calibration_csv: Path
+    settings: SeriesSettings, cycle_csv: Path, calibration_csv: Path,
+    output_format: str = "both",
 ) -> dict[str, Any]:
     """Record the settings and source CSV contents that produced the images."""
     def source(path: Path) -> dict[str, str | None]:
@@ -264,6 +275,7 @@ def configuration_signature(
 
     return {
         "settings": settings_signature(settings),
+        "output_format": output_format,
         "intensity_processing": INTENSITY_PROCESSING,
         "invalid_source_hu": SOURCE_PADDING_HU,
         "invalid_attenuation_value": 0.0,
@@ -276,7 +288,7 @@ def outputs_current(
     output_dir: Path, labels: tuple[int, ...], signature: dict[str, Any]
 ) -> bool:
     """Skip a series only when all images and their settings match."""
-    paths = output_paths(output_dir, labels)
+    paths = output_paths(output_dir, labels, signature.get("output_format", "both"))
     if not all(path.is_file() and path.stat().st_size > 0 for path in paths):
         return False
     sidecar = output_dir / "reconstruction_config.json"
@@ -293,6 +305,20 @@ def save_image(image: np.ndarray, output_dir: Path, stem: str, spacing: tuple[fl
     MedicalImageTool.save(image, output_dir / f"{stem}.nii.gz", voxel_spacing=spacing)
 
 
+def save_selected_image(
+    image: np.ndarray, output_dir: Path, stem: str,
+    spacing: tuple[float, ...], output_format: str,
+) -> None:
+    if output_format == "both":
+        save_image(image, output_dir, stem, spacing)
+    elif output_format == "tif":
+        MedicalImageTool.save(image, output_dir / f"{stem}.tif")
+    elif output_format == "nii":
+        MedicalImageTool.save(image, output_dir / f"{stem}.nii.gz", voxel_spacing=spacing)
+    else:
+        raise ValueError(f"Unknown output format: {output_format}")
+
+
 def process_series(
     series_dir: Path,
     phase_paths: dict[int, Path],
@@ -303,10 +329,13 @@ def process_series(
     air_value: float,
     *,
     settings: SeriesSettings | None = None,
+    output_format: str = "both",
 ) -> dict[str, Any]:
     """Project phase CTs once, then FDK the full prior and each sparse phase."""
     settings = SeriesSettings() if settings is None else settings
     settings.validate()
+    if output_format not in OUTPUT_SUFFIXES:
+        raise ValueError(f"Unknown output format: {output_format}")
     labels = tuple(phase_paths)
     first_image = MedicalImageTool.read(phase_paths[labels[0]])
     volume_shape = tuple(first_image.data.shape)
@@ -368,7 +397,7 @@ def process_series(
     prior, output_spacing = reconstruct_prior(
         projections, geometry, angles, tool, **reconstruction_options
     )
-    save_image(prior, output_dir, "prior_image", output_spacing)
+    save_selected_image(prior, output_dir, "prior_image", output_spacing, output_format)
     prior_shape = list(prior.shape)
     del prior
     gc.collect()
@@ -380,7 +409,8 @@ def process_series(
             projections[selected], geometry, angles[selected], tool,
             **reconstruction_options,
         )
-        save_image(sparse, output_dir, f"phase_{phase:02d}_reconstruction", sparse_spacing)
+        save_selected_image(sparse, output_dir, f"phase_{phase:02d}_reconstruction",
+                            sparse_spacing, output_format)
         phase_shapes[str(phase)] = list(sparse.shape)
         print(f"  phase {phase:02d}: reconstructed {sparse.shape}", flush=True)
         del sparse
@@ -388,6 +418,7 @@ def process_series(
 
     return {
         "status": "complete",
+        "output_format": output_format,
         "source_directory": str(series_dir),
         "phase_files": {str(phase): str(path) for phase, path in phase_paths.items()},
         "phase_view_counts": phase_view_counts,
@@ -410,6 +441,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cycle-csv", type=Path, default=REPO_ROOT / "data" / "cycle.csv")
     parser.add_argument("--calibration-csv", type=Path, default=REPO_ROOT.parent / "compare.csv")
     parser.add_argument("--settings-csv", type=Path, default=DEFAULT_SETTINGS_CSV)
+    parser.add_argument("--output-format", choices=tuple(OUTPUT_SUFFIXES), default="tif",
+                        help="Output file format (default: tif).")
     parser.add_argument(
         "--series", nargs="+", metavar="NAME",
         help="Only reconstruct these pig IDs or relative series paths (space or comma separated).",
@@ -460,7 +493,8 @@ def main() -> int:
         settings = settings_by_series[directory.relative_to(round_root).as_posix()]
         try:
             signature = configuration_signature(
-                settings, args.cycle_csv.resolve(), args.calibration_csv.resolve()
+                settings, args.cycle_csv.resolve(), args.calibration_csv.resolve(),
+                output_format=args.output_format,
             )
             indices = phase_indices(
                 args.cycle_csv.resolve(), labels,
@@ -476,6 +510,7 @@ def main() -> int:
                 record = process_series(
                     directory, phase_paths, destination, indices,
                     polynomial, air_threshold, air_value, settings=settings,
+                    output_format=args.output_format,
                 )
                 (destination / "reconstruction_config.json").write_text(
                     json.dumps(signature, ensure_ascii=False, indent=2), encoding="utf-8"
