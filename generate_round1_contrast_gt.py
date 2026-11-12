@@ -10,10 +10,8 @@ the prior instead reconstructs the phase-mixed scan. Output names are ``phase_XX
 When ``fov_source_pixels`` is positive in the settings CSV, FDK reconstructs
 directly on the same wider fixed-size physical grid as the prior and sparse images.
 
-Examples::
-
-    python generate_round1_contrast_gt.py --series Stent_2_7596 --list
-    python generate_round1_contrast_gt.py --series Stent_2_7596
+Pass round root, output root, and settings CSV explicitly. Select either
+``--calibration-csv`` or ``--no-calibration`` on every invocation.
 """
 
 from __future__ import annotations
@@ -30,13 +28,15 @@ import nibabel as nib
 import numpy as np
 from scipy.ndimage import affine_transform, zoom
 
-from generate_pig_first_phase_prior import load_attenuation_calibration
 from generate_pig_first_phase_prior import reconstruct_prior
+from series_calibration import (apply_reconstruction_calibration,
+                                load_series_calibration, validate_calibration_round)
 from generate_round1_contrast_recon import (
     DEFAULT_ROUND_ROOT,
     DEFAULT_SETTINGS_CSV,
     REPO_ROOT,
     INTENSITY_PROCESSING,
+    POST_CALIBRATION_PROCESSING,
     SOURCE_PADDING_HU,
     SeriesSettings,
     calibrated_volume,
@@ -253,6 +253,7 @@ def process_series(
     *,
     reconstruction_dir: Path | None = None,
     output_format: str = "both",
+    apply_calibration: bool = False,
 ) -> dict[str, Any]:
     """Project and FDK each phase using all scan angles, then save its GT pair."""
     settings.validate()
@@ -272,6 +273,7 @@ def process_series(
         "fov_source_pixels": settings.fov_source_pixels,
         "fov_mask_diameter_shrink_pixels": settings.fov_mask_shrink_pixels,
     }
+    source_polynomial = np.poly1d([1.0, 0.0])
     for phase, path in phase_paths.items():
         image = nib.load(str(path))
         shape = tuple(int(v) for v in image.shape)
@@ -297,7 +299,7 @@ def process_series(
             raise ValueError(f"Phase shape or spacing differs from first phase: {path}")
         hu = np.asarray(image.dataobj, dtype=np.float32)
         volume_mu = calibrated_volume(
-            hu, polynomial, air_threshold, air_value, apply_air_threshold=False,
+            hu, source_polynomial, 0.0, 0.0, apply_air_threshold=False,
         )
         del hu
         projections = np.empty((settings.n_projections, *settings.n_detector), dtype=np.float32)
@@ -316,7 +318,7 @@ def process_series(
         # Direct source sampling is used only to retain the existing validity
         # mask; the saved GT intensities come from the full-view FDK above.
         sampled, mask_spacing, valid_mask = make_phase_gt(
-            image.dataobj, spacing, settings, polynomial, air_threshold, air_value,
+            image.dataobj, spacing, settings, source_polynomial, 0.0, 0.0,
             return_valid_mask=True,
         )
         if gt.shape != valid_mask.shape or not np.allclose(
@@ -325,6 +327,8 @@ def process_series(
             raise ValueError(f"FDK GT grid differs from the source validity mask: {path}")
         del sampled
         gt[valid_mask == 0] = 0.0
+        if apply_calibration:
+            gt = apply_reconstruction_calibration(gt, polynomial)
         sparse_path = (
             reconstruction_dir / f"phase_{phase:02d}_reconstruction.nii.gz"
             if reconstruction_dir is not None else None
@@ -344,6 +348,7 @@ def process_series(
         gc.collect()
     return {
         "status": "complete",
+        "calibration_application": "post_fdk" if apply_calibration else "none",
         "source_directory": str(series_dir),
         "phase_files": {str(k): str(v) for k, v in phase_paths.items()},
         "volume_shape_zyx": list(source_shape),
@@ -370,22 +375,25 @@ def output_paths(
 
 
 def signature(
-    settings: SeriesSettings, calibration_csv: Path, phase_paths: dict[int, Path],
+    settings: SeriesSettings, calibration_csv: Path | None, phase_paths: dict[int, Path],
     output_format: str = "both",
+    calibration_sha256: str | None = None,
 ) -> dict[str, Any]:
     return {
         "settings": settings_signature(settings),
         "gt_generation": GT_GENERATION,
         "output_format": output_format,
-        "intensity_processing": INTENSITY_PROCESSING,
+        "intensity_processing": (POST_CALIBRATION_PROCESSING if calibration_csv is not None
+                                 else INTENSITY_PROCESSING),
         "source_out_of_bounds_value": 0.0,
         "invalid_source_hu": SOURCE_PADDING_HU,
         "invalid_attenuation_value": 0.0,
         "valid_mask_rule": "all_interpolation_sources_valid_and_inside_output_fov",
-        "calibration_csv": {
-            "path": str(calibration_csv.resolve()),
-            "sha256": hashlib.sha256(calibration_csv.read_bytes()).hexdigest(),
-        },
+        "calibration_csv": (
+            {"path": str(calibration_csv.resolve()),
+             "sha256": calibration_sha256 or hashlib.sha256(calibration_csv.read_bytes()).hexdigest()}
+            if calibration_csv is not None else None
+        ),
         "phase_files": {
             str(phase): {"path": str(path.resolve()), "size": path.stat().st_size,
                          "mtime_ns": path.stat().st_mtime_ns}
@@ -408,12 +416,16 @@ def outputs_current(output_dir: Path, phases: tuple[int, ...], config: dict[str,
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--round-root", type=Path, default=DEFAULT_ROUND_ROOT)
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--round-root", type=Path, required=True)
+    parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--recon-root", type=Path, default=None,
                         help="Optional reconstruction directory to verify against.")
-    parser.add_argument("--calibration-csv", type=Path, default=REPO_ROOT.parent / "compare.csv")
-    parser.add_argument("--settings-csv", type=Path, default=DEFAULT_SETTINGS_CSV)
+    calibration = parser.add_mutually_exclusive_group(required=True)
+    calibration.add_argument("--calibration-csv", type=Path,
+                             help="Per-round series table or legacy compare.csv; applied after FDK.")
+    calibration.add_argument("--no-calibration", action="store_true",
+                             help="Explicitly generate uncalibrated HU-to-mu reconstructions.")
+    parser.add_argument("--settings-csv", type=Path, required=True)
     parser.add_argument("--output-format", choices=tuple(OUTPUT_SUFFIXES), default="tif",
                         help="GT file format (default: tif).")
     parser.add_argument("--series", nargs="+", metavar="NAME",
@@ -438,15 +450,16 @@ def main() -> int:
     if args.list:
         return 0
 
-    calibration_path = args.calibration_csv.resolve()
-    polynomial, air_threshold, air_value, calibration_details = load_attenuation_calibration(calibration_path)
-    calibration_details["air_threshold_applied"] = False
+    calibration_path = args.calibration_csv.resolve(strict=True) if args.calibration_csv is not None else None
+    validate_calibration_round(calibration_path, round_root)
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     manifest_path = output_root / "manifest.json"
     manifest: dict[str, Any] = {
         "round_root": str(round_root), "settings_csv": str(args.settings_csv.resolve()),
-        "attenuation_calibration": calibration_details, "series": [],
+        "attenuation_calibration": {"source_csv": str(calibration_path) if calibration_path else None,
+                                    "mode": "requested" if calibration_path else "none"},
+        "series": [],
     }
     failures = 0
     for directory, phase_paths in series:
@@ -455,9 +468,21 @@ def main() -> int:
         reconstruction_dir = (args.recon_root.resolve() / relative
                               if args.recon_root is not None else None)
         settings = settings_by_series[relative.as_posix()]
+        calibration_details = None
         try:
+            if calibration_path is None:
+                polynomial, air_threshold, air_value = np.poly1d([1.0, 0.0]), 0.0, 0.0
+                calibration_details = {"calibration_scope": "none", "source_csv": None,
+                                       "polynomial_coefficients": [1.0, 0.0]}
+            else:
+                polynomial, air_threshold, air_value, calibration_details = load_series_calibration(
+                    calibration_path, relative.as_posix()
+                )
+            calibration_details["air_threshold_applied"] = False
+            calibration_details["application"] = "post_fdk" if calibration_path else "none"
             config = signature(settings, calibration_path, phase_paths,
-                               output_format=args.output_format)
+                               output_format=args.output_format,
+                               calibration_sha256=calibration_details.get("calibration_sha256"))
             if reconstruction_dir is not None:
                 recon_config_path = reconstruction_dir / "reconstruction_config.json"
                 if recon_config_path.is_file():
@@ -477,6 +502,7 @@ def main() -> int:
                     polynomial, air_threshold, air_value, settings,
                     reconstruction_dir=reconstruction_dir,
                     output_format=args.output_format,
+                    apply_calibration=calibration_path is not None,
                 )
                 (destination / "gt_config.json").write_text(
                     json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -487,6 +513,7 @@ def main() -> int:
             print(f"Failed {relative}: {exc}", flush=True)
         record["source_directory"] = str(directory)
         record["output_directory"] = str(destination)
+        record["attenuation_calibration"] = calibration_details
         record["settings"] = asdict(settings)
         manifest["series"].append(record)
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")

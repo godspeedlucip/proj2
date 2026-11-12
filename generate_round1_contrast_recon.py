@@ -14,9 +14,9 @@ voxel counts while keeping ``fov_output_pixels`` fixed. Zero uses the
 original crop/resize behavior. A positive value must fit the unpadded
 detector FOV; the projection geometry is unchanged.
 
-Run with ``--list`` to inspect inputs without TIGRE or GPU work. For example,
-``--series Stent_2_7596 --list`` previews one pig, and
-``--series Stent_2_7596`` reconstructs only that pig. Changing its CSV row
+After supplying required paths and a calibration choice, run with ``--list``
+to inspect inputs without TIGRE or GPU work. ``--series Stent_2_7596 --list``
+previews one pig, and ``--series Stent_2_7596`` reconstructs only that pig. Changing its CSV row
 automatically invalidates prior outputs for that series.
  The CLI saves only TIFF by default; use --output-format nii or both to
  request NIfTI files.
@@ -38,9 +38,10 @@ import numpy as np
 
 from generate_pig_first_phase_prior import (
     calibrate_attenuation,
-    load_attenuation_calibration,
     reconstruct_prior,
 )
+from series_calibration import (apply_reconstruction_calibration,
+                                load_series_calibration, validate_calibration_round)
 from moni.phase_mapping import build_projection_phase_mapping
 from utils.tool import MedicalImageTool, TigreTool
 
@@ -67,7 +68,8 @@ DSD_MM = 1250.0
 MIN_PHASE = 1
 MAX_PHASE = 11
 SOURCE_PADDING_HU = -2048.0
-INTENSITY_PROCESSING = "polynomial_valid_source_only_v2"
+INTENSITY_PROCESSING = "hu_to_mu_valid_source_only_v1"
+POST_CALIBRATION_PROCESSING = "polynomial_post_fdk_zero_preserved_v1"
 
 
 @dataclass(frozen=True)
@@ -263,8 +265,9 @@ def settings_signature(settings: SeriesSettings) -> dict[str, Any]:
 
 
 def configuration_signature(
-    settings: SeriesSettings, cycle_csv: Path, calibration_csv: Path,
+    settings: SeriesSettings, cycle_csv: Path, calibration_csv: Path | None,
     output_format: str = "both",
+    calibration_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Record the settings and source CSV contents that produced the images."""
     def source(path: Path) -> dict[str, str | None]:
@@ -276,11 +279,15 @@ def configuration_signature(
     return {
         "settings": settings_signature(settings),
         "output_format": output_format,
-        "intensity_processing": INTENSITY_PROCESSING,
+        "intensity_processing": (POST_CALIBRATION_PROCESSING if calibration_csv is not None
+                                 else INTENSITY_PROCESSING),
         "invalid_source_hu": SOURCE_PADDING_HU,
         "invalid_attenuation_value": 0.0,
         "cycle_csv": source(cycle_csv),
-        "calibration_csv": source(calibration_csv),
+        "calibration_csv": (
+            {**source(calibration_csv), **({"sha256": calibration_sha256} if calibration_sha256 else {})}
+            if calibration_csv is not None else None
+        ),
     }
 
 
@@ -330,6 +337,7 @@ def process_series(
     *,
     settings: SeriesSettings | None = None,
     output_format: str = "both",
+    apply_calibration: bool = False,
 ) -> dict[str, Any]:
     """Project phase CTs once, then FDK the full prior and each sparse phase."""
     settings = SeriesSettings() if settings is None else settings
@@ -365,6 +373,7 @@ def process_series(
     angles = tool.set_angles(0.0, settings.angle_span_deg, settings.n_projections)
     projections = np.empty((settings.n_projections, *settings.n_detector), dtype=np.float32)
     phase_view_counts: dict[str, int] = {}
+    source_polynomial = np.poly1d([1.0, 0.0])
 
     for phase, path in phase_paths.items():
         image = MedicalImageTool.read(path)
@@ -373,7 +382,7 @@ def process_series(
         if hu.shape != volume_shape or not np.allclose(image_spacing, spacing, rtol=0, atol=1e-5):
             raise ValueError(f"Phase shape or spacing differs from first phase: {path}")
         volume_mu = calibrated_volume(
-            hu, polynomial, air_threshold, air_value, apply_air_threshold=False
+            hu, source_polynomial, 0.0, 0.0, apply_air_threshold=False
         )
         selected = indices_by_phase[phase]
         phase_projections = TigreTool.project_tigre(volume_mu, geometry, angles[selected])
@@ -397,6 +406,8 @@ def process_series(
     prior, output_spacing = reconstruct_prior(
         projections, geometry, angles, tool, **reconstruction_options
     )
+    if apply_calibration:
+        prior = apply_reconstruction_calibration(prior, polynomial)
     save_selected_image(prior, output_dir, "prior_image", output_spacing, output_format)
     prior_shape = list(prior.shape)
     del prior
@@ -409,6 +420,8 @@ def process_series(
             projections[selected], geometry, angles[selected], tool,
             **reconstruction_options,
         )
+        if apply_calibration:
+            sparse = apply_reconstruction_calibration(sparse, polynomial)
         save_selected_image(sparse, output_dir, f"phase_{phase:02d}_reconstruction",
                             sparse_spacing, output_format)
         phase_shapes[str(phase)] = list(sparse.shape)
@@ -418,6 +431,7 @@ def process_series(
 
     return {
         "status": "complete",
+        "calibration_application": "post_fdk" if apply_calibration else "none",
         "output_format": output_format,
         "source_directory": str(series_dir),
         "phase_files": {str(phase): str(path) for phase, path in phase_paths.items()},
@@ -436,11 +450,15 @@ def process_series(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--round-root", type=Path, default=DEFAULT_ROUND_ROOT)
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    parser.add_argument("--cycle-csv", type=Path, default=REPO_ROOT / "data" / "cycle.csv")
-    parser.add_argument("--calibration-csv", type=Path, default=REPO_ROOT.parent / "compare.csv")
-    parser.add_argument("--settings-csv", type=Path, default=DEFAULT_SETTINGS_CSV)
+    parser.add_argument("--round-root", type=Path, required=True)
+    parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument("--cycle-csv", type=Path, required=True)
+    calibration = parser.add_mutually_exclusive_group(required=True)
+    calibration.add_argument("--calibration-csv", type=Path,
+                             help="Per-round series table or legacy compare.csv; applied after FDK.")
+    calibration.add_argument("--no-calibration", action="store_true",
+                             help="Explicitly generate uncalibrated HU-to-mu reconstructions.")
+    parser.add_argument("--settings-csv", type=Path, required=True)
     parser.add_argument("--output-format", choices=tuple(OUTPUT_SUFFIXES), default="tif",
                         help="Output file format (default: tif).")
     parser.add_argument(
@@ -473,9 +491,8 @@ def main() -> int:
     if args.list:
         return 0
 
-    calibration = load_attenuation_calibration(args.calibration_csv.resolve())
-    polynomial, air_threshold, air_value, calibration_details = calibration
-    calibration_details["air_threshold_applied"] = False
+    calibration_path = args.calibration_csv.resolve(strict=True) if args.calibration_csv is not None else None
+    validate_calibration_round(calibration_path, round_root)
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     manifest_path = output_root / "manifest.json"
@@ -483,7 +500,8 @@ def main() -> int:
         "round_root": str(round_root),
         "cycle_csv": str(args.cycle_csv.resolve()),
         "settings_csv": str(args.settings_csv.resolve()),
-        "attenuation_calibration": calibration_details,
+        "attenuation_calibration": {"source_csv": str(calibration_path) if calibration_path else None,
+                                    "mode": "requested" if calibration_path else "none"},
         "series": [],
     }
     failures = 0
@@ -491,10 +509,23 @@ def main() -> int:
         labels = tuple(phase_paths)
         destination = output_root / directory.relative_to(round_root)
         settings = settings_by_series[directory.relative_to(round_root).as_posix()]
+        calibration_details = None
         try:
+            relative = directory.relative_to(round_root).as_posix()
+            if calibration_path is None:
+                polynomial, air_threshold, air_value = np.poly1d([1.0, 0.0]), 0.0, 0.0
+                calibration_details = {"calibration_scope": "none", "source_csv": None,
+                                       "polynomial_coefficients": [1.0, 0.0]}
+            else:
+                polynomial, air_threshold, air_value, calibration_details = load_series_calibration(
+                    calibration_path, relative
+                )
+            calibration_details["air_threshold_applied"] = False
+            calibration_details["application"] = "post_fdk" if calibration_path else "none"
             signature = configuration_signature(
-                settings, args.cycle_csv.resolve(), args.calibration_csv.resolve(),
+                settings, args.cycle_csv.resolve(), calibration_path,
                 output_format=args.output_format,
+                calibration_sha256=calibration_details.get("calibration_sha256"),
             )
             indices = phase_indices(
                 args.cycle_csv.resolve(), labels,
@@ -511,6 +542,7 @@ def main() -> int:
                     directory, phase_paths, destination, indices,
                     polynomial, air_threshold, air_value, settings=settings,
                     output_format=args.output_format,
+                    apply_calibration=calibration_path is not None,
                 )
                 (destination / "reconstruction_config.json").write_text(
                     json.dumps(signature, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -521,6 +553,7 @@ def main() -> int:
             print(f"Failed {directory.relative_to(round_root)}: {exc}", flush=True)
         record["source_directory"] = str(directory)
         record["output_directory"] = str(destination)
+        record["attenuation_calibration"] = calibration_details
         record["settings"] = asdict(settings)
         manifest["series"].append(record)
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
