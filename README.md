@@ -9,7 +9,7 @@ This is a copy of the Round contrast simulation pipeline. On the standalone
 - `generate_pig_first_phase_prior.py`: shared HU-to-attenuation conversion and reconstruction postprocessing.
 - `series_calibration.py`: per-series calibration lookup and post-FDK polynomial application.
 - `utils/` and `moni/`: copied implementations used by the scripts above.
-- `settings/`: Round settings, cycle CSVs, and Round 1–5 heart calibration CSVs.
+- `settings/`: Round settings, cycle CSVs, and Round 1–6 heart calibration CSVs.
 
 Run from the branch checkout root. CT volumes are not included; place them under
 `data/pig/` or point `--round-root` to their location. Pass all paths explicitly. Reconstruction and GT require either
