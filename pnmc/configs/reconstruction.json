@@ -1,0 +1,20 @@
+{
+  "sweeps": 20,
+  "lambda_initial": 1.0,
+  "lambda_decrement": 0.01,
+  "lambda_minimum": 0.1,
+  "row_relative_epsilon": 1e-6,
+  "column_relative_epsilon": 1e-6,
+  "zero_row_measurement_tolerance": 1e-6,
+  "fdk_mode": "tigre_standard_approx",
+  "fdk_filter": "ramp",
+  "fdk_padding": 100,
+  "registration": {
+    "shrink_factors": [4, 2, 1],
+    "iterations": [80, 40, 20],
+    "image_sigma_mm": [2.0, 1.0, 0.0],
+    "field_sigma_mm": 1.0,
+    "support_threshold": 0.01,
+    "taper_mm": 10.0
+  }
+}

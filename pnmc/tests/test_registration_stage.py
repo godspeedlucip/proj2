@@ -10,6 +10,8 @@ import torch
 from pnmc.config import RegistrationConfig
 from pnmc.data.schema import ArrayRef, CaseManifest, GridSpec
 from pnmc.data.volume_io import save_volume
+from pnmc.motion.registration import register
+from pnmc.motion.warp import warp_pull
 from pnmc.pipeline import _registration_stage
 
 
@@ -81,3 +83,25 @@ def test_pipeline_uses_package_registration_stage(tmp_path, monkeypatch):
     result = _registration_stage(None, Path("enhanced.json"),
                                  RegistrationConfig(), tmp_path, object())
     assert result == tmp_path / "registration.json"
+
+
+def test_actual_demons_improves_textured_translation():
+    grid = GridSpec((32, 32, 32), (1., 1., 1.), (-15.5, -15.5, -15.5),
+                    ((1., 0., 0.), (0., 1., 0.), (0., 0., 1.)), "scanner")
+    z, y, x = np.mgrid[:32, :32, :32]
+    fixed = (np.exp(-((x-13)**2+(y-17)**2+(z-15)**2)/28.) +
+             .6*np.exp(-((x-22)**2+(y-10)**2+(z-21)**2)/17.)).astype(np.float32)
+    moving = np.zeros_like(fixed)
+    moving[:, :, 1:] = fixed[:, :, :-1]
+    fixed_t = torch.from_numpy(fixed)
+    moving_t = torch.from_numpy(moving)
+    config = RegistrationConfig(shrink_factors=(2, 1), iterations=(25, 35),
+                                image_sigma_mm=(1., 0.), field_sigma_mm=1.,
+                                support_threshold=.01, taper_mm=2.)
+    field, details = register(moving_t, fixed_t, grid, config)
+    assert details["direction"] == "target_fixed_to_source_moving"
+    region = fixed_t > .2
+    before = torch.mean((moving_t[region]-fixed_t[region])**2)
+    after = torch.mean((warp_pull(moving_t, field, grid, grid)[region]-fixed_t[region])**2)
+    assert after < before
+    assert field[0, region].median().item() > 0
