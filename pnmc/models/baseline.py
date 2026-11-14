@@ -3,7 +3,7 @@
 import torch.nn as nn
 import torch.nn.functional as F
 
-from PriorNet_pytorch import Dense2D
+from pnmc.models.legacy_priornet import Dense2D
 from pnmc.data.normalization import denormalize
 from pnmc.data.schema import NormalizationSpec
 
