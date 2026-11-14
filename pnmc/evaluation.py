@@ -242,7 +242,7 @@ def _evaluate_physical_run(report: dict, references: Path, output: Path, *,
             from pnmc.data.manifest import vector_values
             from pnmc.experiments import measurement_metrics
             from pnmc.reconstruction.projector import TigreProjector
-            from register_pnmc import _geometric_support
+            from pnmc.motion.stage import geometric_support
 
             if projector is None:
                 projector = TigreProjector(case.geometry, grid,
@@ -250,7 +250,7 @@ def _evaluate_physical_run(report: dict, references: Path, output: Path, *,
                                            device="cuda:0")
             result["measurement_metrics"] = measurement_metrics(
                 predictions, case, projector=projector,
-                support_mask=_geometric_support(case))
+                support_mask=geometric_support(case))
             result["measurement_metrics_status"] = "passed"
             ray_count = result["measurement_metrics"]["ray_count"]
             mc_by_target = {}

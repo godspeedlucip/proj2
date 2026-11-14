@@ -141,7 +141,8 @@ def run_case(case, *, checkpoint: Path, network_config,
     from pnmc.reconstruction.mc_ossart import reconstruct_target
     from pnmc.reconstruction.projector import TigreProjector
     from pnmc.runtime import environment_report
-    from register_pnmc import _enhanced_volumes, _geometric_support, register_case
+    from pnmc.motion.stage import (load_enhanced_volumes,
+                                   geometric_support, register_case)
     from pnmc.config import RegistrationConfig
 
     output = Path(output).resolve()
@@ -222,7 +223,7 @@ def run_case(case, *, checkpoint: Path, network_config,
                              lambda folder: {"report": _copy_stage_file(
                                  enhanced_fixture, folder / "report.json")})
     enhanced_report = Path(enhanced["artifacts"]["report"]["path"])
-    volumes, volume_hashes, enhanced_data = _enhanced_volumes(enhanced_report, case)
+    volumes, volume_hashes, enhanced_data = load_enhanced_volumes(enhanced_report, case)
     registration_config = RegistrationConfig.from_dict(
         reconstruction_config.registration or {})
     if registration_fixture is None:
@@ -239,7 +240,7 @@ def run_case(case, *, checkpoint: Path, network_config,
                 registration_fixture, folder / "registration.json")})
     fields, registration = _load_fields(
         Path(registered["artifacts"]["report"]["path"]), case)
-    support = _geometric_support(case)
+    support = geometric_support(case)
     support_sha = digest_json({"shape": list(support.shape),
                                "packed": hashlib.sha256(support.numpy().tobytes()).hexdigest()})
     targets = {}
@@ -316,6 +317,6 @@ def _fdk_stage(case, projector, folder: Path) -> Path:
 
 def _registration_stage(case, enhanced_report: Path, config,
                         folder: Path, projector) -> Path:
-    from register_pnmc import register_case
+    from pnmc.motion.stage import register_case
     register_case(case, enhanced_report, config, folder, projector=projector)
     return folder / "registration.json"
