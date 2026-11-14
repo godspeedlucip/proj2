@@ -165,3 +165,33 @@ def test_cli_check_only_prints_report_without_output_directory(tmp_path,
                      "--check-only"]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "passed"
     assert not output.exists()
+
+
+@pytest.mark.parametrize("override", [
+    {"row_relative_epsilon": -1.},
+    {"column_relative_epsilon": 1.},
+    {"zero_row_measurement_tolerance": -1.},
+    {"fdk_padding": -1},
+    {"registration": {"support_threshold": 1.2}},
+    {"registration": {"image_sigma_mm": [-1., 0., 0.]}},
+])
+def test_cli_preflight_rejects_runtime_invalid_parameters(tmp_path, monkeypatch,
+                                                           capsys, override):
+    from pnmc import cli, preflight
+
+    paths = make_inputs(tmp_path)
+    monkeypatch.setattr(preflight, "_check_dependencies", lambda: {})
+    config = json.loads(paths[3].read_text())
+    config.update(override)
+    paths[3].write_text(json.dumps(config), encoding="utf-8")
+    output = tmp_path / "out"
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["reconstruct", "--case", str(paths[0]),
+                  "--checkpoint", str(paths[1]),
+                  "--network-config", str(paths[2]),
+                  "--config", str(paths[3]),
+                  "--output", str(output), "--device", "cpu",
+                  "--check-only"])
+    assert exc.value.code == 2
+    assert "failed" in capsys.readouterr().err
+    assert not output.exists()

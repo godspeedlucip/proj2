@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import hashlib
+import math
 from pathlib import Path
 import pickle
 
@@ -32,6 +33,44 @@ def _digest_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _validate_runtime_config(reconstruction: ReconstructionConfig,
+                             registration: RegistrationConfig) -> None:
+    def finite(value):
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value))
+
+    if type(reconstruction.sweeps) is not int or reconstruction.sweeps <= 0:
+        raise ValueError("reconstruction sweeps must be a positive integer")
+    if (any(not finite(value) for value in (
+            reconstruction.lambda_initial, reconstruction.lambda_decrement,
+            reconstruction.lambda_minimum)) or
+            reconstruction.lambda_initial <= 0 or
+            reconstruction.lambda_decrement < 0 or
+            reconstruction.lambda_minimum <= 0):
+        raise ValueError("invalid reconstruction lambda schedule")
+    if (type(reconstruction.fdk_padding) is not int or
+            reconstruction.fdk_padding < 0):
+        raise ValueError("FDK detector padding must be a non-negative integer")
+    if (not finite(reconstruction.row_relative_epsilon) or
+            not 0 < reconstruction.row_relative_epsilon < 1 or
+            not finite(reconstruction.column_relative_epsilon) or
+            not 0 < reconstruction.column_relative_epsilon < 1 or
+            not finite(reconstruction.zero_row_measurement_tolerance) or
+            reconstruction.zero_row_measurement_tolerance < 0):
+        raise ValueError("invalid MC normalization tolerances")
+    if (not finite(registration.support_threshold) or
+            not 0 < registration.support_threshold < 1):
+        raise ValueError("invalid motion support threshold")
+    if (any(type(value) is not int or value <= 0
+            for value in (*registration.shrink_factors, *registration.iterations)) or
+            any(not finite(value) or value < 0
+                for value in registration.image_sigma_mm) or
+            not finite(registration.field_sigma_mm) or
+            registration.field_sigma_mm < 0 or
+            not finite(registration.taper_mm) or registration.taper_mm <= 0):
+        raise ValueError("invalid registration scale or sigma")
+
+
 def check_reconstruction_inputs(case_path: Path, checkpoint: Path,
                                 network_config_path: Path,
                                 reconstruction_config_path: Path, *,
@@ -51,7 +90,8 @@ def check_reconstruction_inputs(case_path: Path, checkpoint: Path,
 
     network = NetworkConfig.from_json(network_config_path)
     reconstruction = ReconstructionConfig.from_json(reconstruction_config_path)
-    RegistrationConfig.from_dict(reconstruction.registration or {})
+    registration = RegistrationConfig.from_dict(reconstruction.registration or {})
+    _validate_runtime_config(reconstruction, registration)
     if network.model != "pnnet":
         raise ValueError("full PNMC requires a PN-Net network configuration")
 

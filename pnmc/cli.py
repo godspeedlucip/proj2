@@ -143,7 +143,8 @@ def main(argv: list[str] | None = None) -> int:
                           "case_id": result["case_id"], "output": str(args.output)}
         print(json.dumps(result, ensure_ascii=False, allow_nan=False))
         return 0
-    except (ValueError, RuntimeError, OSError, KeyError, ImportError) as exc:
+    except (ValueError, RuntimeError, OSError, KeyError, ImportError,
+            TypeError) as exc:
         parser.exit(2, "{} failed: {}\n".format(args.command, exc))
 
 
