@@ -43,7 +43,7 @@ class Conv2D(nn.Module):
 #         # out2 = self.conv2(out1)
 #         # out3 = self.conv3(torch.cat([out2, out1], dim=1))
 #         return out3 + skip
-    
+
 
 class DenseBlock(nn.Module):
     def __init__(self, input_channels, num_filters):
@@ -181,5 +181,3 @@ if __name__ == '__main__':
     _1, output = model(input, prior)
     print(output.shape)
     print(_1.shape)
-
-

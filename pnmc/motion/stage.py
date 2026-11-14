@@ -146,5 +146,3 @@ def register_case(case, enhanced_report: Path, config: RegistrationConfig,
     report["enhanced_volume_sha256_by_phase"] = input_hashes
     _write_json(Path(output).resolve() / "registration.json", report)
     return report
-
-
