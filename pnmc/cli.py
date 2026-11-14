@@ -12,6 +12,7 @@ from pnmc.data.manifest import load_case_manifest, load_network_manifest
 from pnmc.inference import infer_case
 from pnmc.motion.stage import register_case
 from pnmc.pipeline import run_case
+from pnmc.preflight import check_reconstruction_inputs
 
 
 def _write_audit(path: Path, value: dict) -> None:
@@ -82,6 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     reconstruct.add_argument("--device", default="cuda:0")
     reconstruct.add_argument("--resume", action="store_true",
                              help="Reuse verified stages and complete targets")
+    reconstruct.add_argument("--check-only", action="store_true",
+                             help="Validate inputs without running FDK or MC-OSSART")
     return parser
 
 
@@ -107,16 +110,31 @@ def main(argv: list[str] | None = None) -> int:
             network = NetworkConfig.from_dict({**asdict(network),
                                                "device": args.device})
             reconstruction = ReconstructionConfig.from_json(args.config)
-            if len(args.case) == 1:
+            if args.check_only:
+                if len(args.case) != 1:
+                    raise ValueError("--check-only requires exactly one --case")
+                result = check_reconstruction_inputs(
+                    args.case[0], args.checkpoint, args.network_config,
+                    args.config, device=args.device)
+            elif len(args.case) == 1:
+                check_reconstruction_inputs(args.case[0], args.checkpoint,
+                                            args.network_config, args.config,
+                                            device=args.device)
                 case = load_case_manifest(args.case[0], require_physics=True)
                 result = run_case(case, checkpoint=args.checkpoint,
                                   network_config=network,
                                   reconstruction_config=reconstruction,
                                   output=args.output, resume=args.resume)
             else:
+                def checked_case(path):
+                    check_reconstruction_inputs(path, args.checkpoint,
+                                                args.network_config, args.config,
+                                                device=args.device)
+                    return load_case_manifest(path, require_physics=True)
+
                 result = run_candidates(
                     args.case, args.output,
-                    loader=lambda path: load_case_manifest(path, require_physics=True),
+                    loader=checked_case,
                     runner=lambda case, folder: run_case(
                         case, checkpoint=args.checkpoint, network_config=network,
                         reconstruction_config=reconstruction, output=folder,

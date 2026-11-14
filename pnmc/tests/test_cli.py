@@ -48,6 +48,8 @@ def test_reconstruct_passes_case_checkpoint_config_and_resume(tmp_path, monkeypa
         return {"status": "passed", "case_id": actual_case.case_id}
 
     monkeypatch.setattr(cli, "run_case", fake_run_case)
+    monkeypatch.setattr(cli, "check_reconstruction_inputs", lambda *a, **kw: {
+        "status": "passed"})
     output = tmp_path / "output"
     assert cli.main(["reconstruct", "--case", str(case_path),
                      "--checkpoint", str(checkpoint),
