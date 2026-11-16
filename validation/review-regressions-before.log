@@ -1,0 +1,102 @@
+test_excluded_ambiguous_identity_does_not_block_selected_case (tests.test_review_regressions.ReviewRegressions) ... ERROR
+test_failed_expansion_marks_current_request_incomplete (tests.test_review_regressions.ReviewRegressions) ... FAIL
+test_image_import_rejects_contradictory_contracts (tests.test_review_regressions.ReviewRegressions) ... test_impossible_selected_animal_cannot_be_silently_skipped (tests.test_review_regressions.ReviewRegressions) ... FAIL
+test_reordered_manifest_preserves_draws (tests.test_review_regressions.ReviewRegressions) ... FAIL
+{"event": "epoch", "epoch": 1, "stage": 1, "steps": 2, "train_l1": 0.9364118874073029, "train_total": 0.9364118874073029, "validation_l1": 0.9248326908458363, "validation_animal_l1": 0.9248326908458363, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.22093400000000019, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "valid_fraction": 1.0, "validation_cases": {"b": 0.9248326908458363}}
+test_resume_cannot_write_foreign_or_empty_run (tests.test_review_regressions.ReviewRegressions) ... FAIL
+
+======================================================================
+ERROR: test_excluded_ambiguous_identity_does_not_block_selected_case (tests.test_review_regressions.ReviewRegressions)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\desktop\����2\proj\RSTAR4D\tests\test_review_regressions.py", line 80, in test_excluded_ambiguous_identity_does_not_block_selected_case
+    result=simulate_manifest(raw,cfg,root/'prepared')
+  File "D:\desktop\����2\proj\RSTAR4D\rstar4d\simulation\pipeline.py", line 203, in simulate_manifest
+    rows=read_raw_manifest(manifest)
+  File "D:\desktop\����2\proj\RSTAR4D\rstar4d\simulation\pipeline.py", line 62, in read_raw_manifest
+    if not row.get('animal_id'): raise ValueError(f'{row["case_id"]}: explicit animal_id/identity_map required')
+ValueError: excluded: explicit animal_id/identity_map required
+
+======================================================================
+FAIL: test_failed_expansion_marks_current_request_incomplete (tests.test_review_regressions.ReviewRegressions)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\desktop\����2\proj\RSTAR4D\tests\test_review_regressions.py", line 94, in test_failed_expansion_marks_current_request_incomplete
+    self.assertFalse(status['complete']); self.assertEqual(status['requested_case_ids'],['a','b'])
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_image_import_rejects_contradictory_contracts (tests.test_review_regressions.ReviewRegressions) (change='phase')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\desktop\����2\proj\RSTAR4D\tests\test_review_regressions.py", line 59, in test_image_import_rejects_contradictory_contracts
+    import_paired(root/'sources.jsonl',root/change)
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_image_import_rejects_contradictory_contracts (tests.test_review_regressions.ReviewRegressions) (change='calibration')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\desktop\����2\proj\RSTAR4D\tests\test_review_regressions.py", line 59, in test_image_import_rejects_contradictory_contracts
+    import_paired(root/'sources.jsonl',root/change)
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_image_import_rejects_contradictory_contracts (tests.test_review_regressions.ReviewRegressions) (change='geometry')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\desktop\����2\proj\RSTAR4D\tests\test_review_regressions.py", line 59, in test_image_import_rejects_contradictory_contracts
+    import_paired(root/'sources.jsonl',root/change)
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_impossible_selected_animal_cannot_be_silently_skipped (tests.test_review_regressions.ReviewRegressions)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\desktop\����2\proj\RSTAR4D\tests\test_review_regressions.py", line 39, in test_impossible_selected_animal_cannot_be_silently_skipped
+    self.assertGreater(errors,25)
+AssertionError: 0 not greater than 25
+
+======================================================================
+FAIL: test_reordered_manifest_preserves_draws (tests.test_review_regressions.ReviewRegressions)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\desktop\����2\proj\RSTAR4D\tests\test_review_regressions.py", line 25, in test_reordered_manifest_preserves_draws
+    self.assertEqual([a[i]['case_id'] for i in range(12)],[b[i]['case_id'] for i in range(12)])
+AssertionError: Lists differ: ['a', 'a', 'a', 'a', 'b', 'a', 'b', 'a', 'b', 'a', 'b', 'b'] != ['b', 'b', 'b', 'b', 'a', 'b', 'a', 'b', 'a', 'b', 'a', 'a']
+
+First differing element 0:
+'a'
+'b'
+
+- ['a', 'a', 'a', 'a', 'b', 'a', 'b', 'a', 'b', 'a', 'b', 'b']
++ ['b', 'b', 'b', 'b', 'a', 'b', 'a', 'b', 'a', 'b', 'a', 'a']
+
+======================================================================
+FAIL: test_resume_cannot_write_foreign_or_empty_run (tests.test_review_regressions.ReviewRegressions) (destination='C:\\Users\\19599\\AppData\\Local\\Temp\\tmpjv3tq0qz\\b')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\desktop\����2\proj\RSTAR4D\tests\test_review_regressions.py", line 68, in test_resume_cannot_write_foreign_or_empty_run
+    train(cfg,manifest,split,dest,1,resume=root/'a/checkpoints/last.pt')
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_resume_cannot_write_foreign_or_empty_run (tests.test_review_regressions.ReviewRegressions) (destination='C:\\Users\\19599\\AppData\\Local\\Temp\\tmpjv3tq0qz\\empty')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\desktop\����2\proj\RSTAR4D\tests\test_review_regressions.py", line 68, in test_resume_cannot_write_foreign_or_empty_run
+    train(cfg,manifest,split,dest,1,resume=root/'a/checkpoints/last.pt')
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_resume_cannot_write_foreign_or_empty_run (tests.test_review_regressions.ReviewRegressions)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\desktop\����2\proj\RSTAR4D\tests\test_review_regressions.py", line 70, in test_resume_cannot_write_foreign_or_empty_run
+    self.assertFalse((other/'resolved_config.json').exists())
+AssertionError: True is not false
+
+----------------------------------------------------------------------
+Ran 6 tests in 1.680s
+
+FAILED (failures=9, errors=1)

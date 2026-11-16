@@ -1,0 +1,8 @@
+{"event": "epoch", "epoch": 1, "stage": 1, "steps": 2, "train_l1": 0.6000898083051046, "train_total": 0.6000898083051046, "validation_l1": 0.602766600522128, "validation_animal_l1": 0.602766600522128, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.009985299999999864, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "sample_count": 3, "shape_counts_tzyx": {"10x1x16x16": 3}, "animal_draw_counts": {"a": 3}, "valid_fraction": 1.0, "validation_cases": {"b": 0.602766600522128}}
+test_accumulation_final_short_group_has_full_weight (tests.test_training.TrainingTests) ... ok
+test_image_import_rejects_contradictory_contracts (tests.test_review_regressions.ReviewRegressions) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.878s
+
+OK

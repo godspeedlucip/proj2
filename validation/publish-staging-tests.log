@@ -1,0 +1,99 @@
+test_boundary_profiles (test_acceptance.AcceptanceTests) ... ok
+test_no_valid_ssim_window (test_acceptance.AcceptanceTests) ... ok
+test_self_projection_no_duplicate_source_offset (test_acceptance.AcceptanceTests) ... D:\python\miniconda\env\env\common\lib\site-packages\tigre\utilities\Ax.py:38: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  return _Ax_ext(img, geox, geox.angles, projection_type, geox.mode, gpuids=gpuids)
+ok
+test_shared_resampling (test_acceptance.AcceptanceTests) ... ok
+test_shifted_source_fdk_output_reprojection (test_acceptance.AcceptanceTests) ... D:\python\miniconda\env\env\common\lib\site-packages\tigre\utilities\Atb.py:40: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  return _Atb_ext(projections, geox, geox.angles, backprojection_type, geox.mode, gpuids=gpuids)
+ok
+test_two_stages_overfit_nonconstant_fixture (test_acceptance.AcceptanceTests) ... D:\python\miniconda\env\env\common\lib\site-packages\pytorch_msssim\ssim.py:50: UserWarning: Skipping Gaussian Smoothing at dimension 2+0 for input: torch.Size([1, 1, 10, 16, 16]) and win size: 11
+  warnings.warn(
+D:\python\miniconda\env\env\common\lib\site-packages\pytorch_msssim\ssim.py:50: UserWarning: Skipping Gaussian Smoothing at dimension 2+0 for input: torch.Size([1, 10, 4, 16, 16]) and win size: 11
+  warnings.warn(
+OVERFIT_RESULT [{"stage": 1, "steps": 60, "first20_l1": 0.664854896068573, "last20_l1": 0.22161511406302453}, {"stage": 2, "steps": 89, "first20_l1": 0.22901488617062568, "last20_l1": 0.11225092262029648}]
+ok
+test_all_commands_exposed (test_cli.CliTests) ... ok
+test_two_entry_points_end_to_end (test_cli.CliTests) ... D:\python\miniconda\env\env\common\lib\site-packages\tigre\utilities\Ax.py:38: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  return _Ax_ext(img, geox, geox.angles, projection_type, geox.mode, gpuids=gpuids)
+D:\python\miniconda\env\env\common\lib\site-packages\tigre\utilities\Atb.py:40: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  return _Atb_ext(projections, geox, geox.angles, backprojection_type, geox.mode, gpuids=gpuids)
+ok
+test_contract_hash_and_animal_split (test_data.DataTests) ... ok
+test_paired_entry_roundtrip_and_metadata_required (test_data.DataTests) ... ok
+test_sampling_variable_t_and_synchronization (test_data.DataTests) ... ok
+test_small_volume_pad_and_empty_mask (test_data.DataTests) ... ok
+test_metric_units_empty_roi_and_window_mask (test_inference.InferenceTests) ... ok
+test_projection_inapplicable (test_inference.InferenceTests) ... ok
+test_tiled_identity_odd_shapes_and_temporal_axis (test_inference.InferenceTests) ... ok
+test_odd_shape_and_config (test_model.ModelTests) ... ok
+test_public_loss_exact_and_mask_gradient (test_model.ModelTests) ... ok
+test_stage_transition_preserves_other_weights (test_model.ModelTests) ... ok
+test_weights_and_exact_notebook_forward (test_model.ModelTests) ... ok
+test_odd_even_shift_crop_wide_and_zoom_masks (test_reference_parity.SourceParityTests) ... ok
+test_original_cuda_reconstruction_with_shifted_odd_grids (test_reference_parity.SourceParityTests) ... D:\python\miniconda\env\env\common\lib\site-packages\tigre\utilities\Ax.py:38: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  return _Ax_ext(img, geox, geox.angles, projection_type, geox.mode, gpuids=gpuids)
+D:\python\miniconda\env\env\common\lib\site-packages\tigre\utilities\Atb.py:40: DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)
+  return _Atb_ext(projections, geox, geox.angles, backprojection_type, geox.mode, gpuids=gpuids)
+ok
+test_excluded_ambiguous_identity_does_not_block_selected_case (test_review_regressions.ReviewRegressions) ... ok
+test_failed_expansion_marks_current_request_incomplete (test_review_regressions.ReviewRegressions) ... ok
+test_image_import_rejects_contradictory_contracts (test_review_regressions.ReviewRegressions) ... ok
+test_impossible_selected_animal_cannot_be_silently_skipped (test_review_regressions.ReviewRegressions) ... ok
+test_projection_case_animal_aggregation_and_nulls (test_review_regressions.ReviewRegressions) ... ok
+test_reordered_manifest_preserves_draws (test_review_regressions.ReviewRegressions) ... ok
+{"event": "epoch", "epoch": 1, "stage": 1, "steps": 2, "train_l1": 0.9364118874073029, "train_total": 0.9364118874073029, "validation_l1": 0.9248326908458363, "validation_animal_l1": 0.9248326908458363, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.21883090000000038, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "sample_count": 2, "shape_counts_tzyx": {"10x1x16x16": 2}, "animal_draw_counts": {"a": 2}, "valid_fraction": 1.0, "validation_cases": {"b": 0.9248326908458363}}
+test_resume_cannot_write_foreign_or_empty_run (test_review_regressions.ReviewRegressions) ... ok
+test_cuda_reference_reconstruction_and_mask (test_simulation.SimulationTests) ... ok
+test_cycle_mapping (test_simulation.SimulationTests) ... ok
+{"case": "phantom_0", "phase": 1, "step": "project_gt"}
+{"case": "phantom_0", "phase": 2, "step": "project_gt"}
+{"case": "phantom_0", "phase": 3, "step": "project_gt"}
+{"case": "phantom_0", "phase": 4, "step": "project_gt"}
+{"case": "phantom_0", "phase": 5, "step": "project_gt"}
+{"case": "phantom_0", "phase": 6, "step": "project_gt"}
+{"case": "phantom_0", "phase": 7, "step": "project_gt"}
+{"case": "phantom_0", "phase": 8, "step": "project_gt"}
+{"case": "phantom_0", "phase": 9, "step": "project_gt"}
+{"case": "phantom_0", "phase": 10, "step": "project_gt"}
+{"case": "phantom_1", "phase": 1, "step": "project_gt"}
+{"case": "phantom_1", "phase": 2, "step": "project_gt"}
+{"case": "phantom_1", "phase": 3, "step": "project_gt"}
+{"case": "phantom_1", "phase": 4, "step": "project_gt"}
+{"case": "phantom_1", "phase": 5, "step": "project_gt"}
+{"case": "phantom_1", "phase": 6, "step": "project_gt"}
+{"case": "phantom_1", "phase": 7, "step": "project_gt"}
+{"case": "phantom_1", "phase": 8, "step": "project_gt"}
+{"case": "phantom_1", "phase": 9, "step": "project_gt"}
+{"case": "phantom_1", "phase": 10, "step": "project_gt"}
+{"case": "phantom_1", "phase": 11, "step": "project_gt"}
+{"case": "phantom_2", "phase": 1, "step": "project_gt"}
+{"case": "phantom_2", "phase": 2, "step": "project_gt"}
+{"case": "phantom_2", "phase": 3, "step": "project_gt"}
+{"case": "phantom_2", "phase": 4, "step": "project_gt"}
+{"case": "phantom_2", "phase": 5, "step": "project_gt"}
+{"case": "phantom_2", "phase": 6, "step": "project_gt"}
+{"case": "phantom_2", "phase": 7, "step": "project_gt"}
+{"case": "phantom_2", "phase": 8, "step": "project_gt"}
+{"case": "phantom_2", "phase": 9, "step": "project_gt"}
+{"case": "phantom_2", "phase": 10, "step": "project_gt"}
+test_raw_phantom_pipeline (test_simulation.SimulationTests) ... ok
+test_units_padding_calibration (test_simulation.SimulationTests) ... ok
+{"event": "epoch", "epoch": 1, "stage": 1, "steps": 2, "train_l1": 0.6000898083051046, "train_total": 0.6000898083051046, "validation_l1": 0.602766600522128, "validation_animal_l1": 0.602766600522128, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.009309899999998095, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "sample_count": 3, "shape_counts_tzyx": {"10x1x16x16": 3}, "animal_draw_counts": {"a": 3}, "valid_fraction": 1.0, "validation_cases": {"b": 0.602766600522128}}
+test_accumulation_final_short_group_has_full_weight (test_training.TrainingTests) ... ok
+{"event": "epoch", "epoch": 1, "stage": 1, "steps": 2, "train_l1": 0.940308153629303, "train_total": 0.940308153629303, "validation_l1": 0.9248400601473722, "validation_animal_l1": 0.9248400601473722, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.21968340000000097, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "sample_count": 2, "shape_counts_tzyx": {"10x1x16x16": 2}, "animal_draw_counts": {"a": 2}, "valid_fraction": 1.0, "validation_cases": {"b": 0.9248400601473722}}
+{"event": "epoch", "epoch": 2, "stage": 1, "steps": 4, "train_l1": 0.920257568359375, "train_total": 0.920257568359375, "validation_l1": 0.899076375094327, "validation_animal_l1": 0.899076375094327, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.22578239999999994, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "sample_count": 2, "shape_counts_tzyx": {"10x1x16x16": 2}, "animal_draw_counts": {"a": 2}, "valid_fraction": 1.0, "validation_cases": {"b": 0.899076375094327}}
+{"event": "epoch", "epoch": 1, "stage": 1, "steps": 2, "train_l1": 0.940308153629303, "train_total": 0.940308153629303, "validation_l1": 0.9248400601473722, "validation_animal_l1": 0.9248400601473722, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.22578850000000017, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "sample_count": 2, "shape_counts_tzyx": {"10x1x16x16": 2}, "animal_draw_counts": {"a": 2}, "valid_fraction": 1.0, "validation_cases": {"b": 0.9248400601473722}}
+{"event": "epoch", "epoch": 2, "stage": 1, "steps": 4, "train_l1": 0.920257568359375, "train_total": 0.920257568359375, "validation_l1": 0.899076375094327, "validation_animal_l1": 0.899076375094327, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.22358540000000104, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "sample_count": 2, "shape_counts_tzyx": {"10x1x16x16": 2}, "animal_draw_counts": {"a": 2}, "valid_fraction": 1.0, "validation_cases": {"b": 0.899076375094327}}
+test_exact_epoch_resume_and_mutation_rejected (test_training.TrainingTests) ... ok
+test_nonfinite_output_records_failure_without_checkpoint (test_training.TrainingTests) ... ok
+{"event": "epoch", "epoch": 1, "stage": 1, "steps": 2, "train_l1": 0.9364118874073029, "train_total": 0.9364118874073029, "validation_l1": 0.9248326908458363, "validation_animal_l1": 0.9248326908458363, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.22166460000000043, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "sample_count": 2, "shape_counts_tzyx": {"10x1x16x16": 2}, "animal_draw_counts": {"a": 2}, "valid_fraction": 1.0, "validation_cases": {"b": 0.9248326908458363}}
+{"event": "epoch", "epoch": 2, "stage": 1, "steps": 4, "train_l1": 0.9145523607730865, "train_total": 0.9145523607730865, "validation_l1": 0.8990672718394886, "validation_animal_l1": 0.8990672718394886, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.219823599999998, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "sample_count": 2, "shape_counts_tzyx": {"10x1x16x16": 2}, "animal_draw_counts": {"a": 2}, "valid_fraction": 1.0, "validation_cases": {"b": 0.8990672718394886}}
+{"event": "epoch", "epoch": 1, "stage": 2, "steps": 2, "train_l1": 0.8820309042930603, "train_total": 0.8820309042930603, "validation_l1": 0.8162560896439985, "validation_animal_l1": 0.8162560896439985, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.4482430000000015, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "sample_count": 2, "shape_counts_tzyx": {"10x4x16x16": 2}, "animal_draw_counts": {"a": 2}, "valid_fraction": 1.0, "validation_cases": {"b": 0.8162560896439985}}
+{"event": "epoch", "epoch": 2, "stage": 2, "steps": 4, "train_l1": 0.7749994695186615, "train_total": 0.7749994695186615, "validation_l1": 0.7178310047496449, "validation_animal_l1": 0.7178310047496449, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.435300299999998, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "sample_count": 2, "shape_counts_tzyx": {"10x4x16x16": 2}, "animal_draw_counts": {"a": 2}, "valid_fraction": 1.0, "validation_cases": {"b": 0.7178310047496449}}
+test_two_stage_pipeline_reentry (test_training.TrainingTests) ... ok
+
+----------------------------------------------------------------------
+Ran 36 tests in 24.440s
+
+OK

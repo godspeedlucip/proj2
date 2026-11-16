@@ -1,0 +1,7 @@
+profile: pig_mu_v1
+settings_root: 'D:/desktop/课题2/get_data/settings/heart_only'
+cycle_csv: 'D:/desktop/课题2/data/cycle.csv'
+calibration: {mode: none}
+prior_mode: phase_weighted_fdk
+view_batch: 64
+full_object_fov: false

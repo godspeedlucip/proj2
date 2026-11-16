@@ -1,0 +1,12 @@
+profile: pig_heart_post_fdk_v1
+settings_root: 'D:/desktop/课题2/get_data/settings/heart_only'
+cycle_csv: 'D:/desktop/课题2/data/cycle.csv'
+calibration:
+  mode: post_fdk
+  root: 'D:/desktop/课题2/get_data/settings/heart_only'
+view_batch: 64
+# Public MATLAB semantics; select all_views_fdk to match the user's prior helper instead.
+prior_mode: phase_weighted_fdk
+noise: {kind: none, photons: 50000.0}
+save_projections: true
+full_object_fov: false

@@ -1,0 +1,21 @@
+# Execution ledger — plan: 2026-11-16-complete-training-implementation.md
+
+Ruling: user explicitly authorized full implementation; proceed without an additional design/plan approval gate.
+Ruling: workspace is not a Git checkout (git rev-parse fails); retain current user-selected writable directory, no branch/worktree/commit workflow applies.
+Ruling: use a flat installable rstar4d package so `python -m rstar4d` works in the current Windows environment without mutating the external Conda environment; the module boundaries remain those in Spec.
+Ruling: public code overrides Spec loss/schedule defaults. Full-valid public loss is numerically identical; masked loss extends it by excluding invalid SSIM windows. Pig normalization and reduced spatial blocks remain explicit domain/resource adaptations.
+Pre-flight: Tasks1→4/5 share create_model, loss/config interfaces; Tasks2→3/4/5 share manifest/metadata and data fingerprints; Task3 supplies paired files consumed by Tasks2/4; Task4 checkpoint consumed by Task5. Interfaces are fixed in the plan; no unresolved conflict.
+
+Task 1: complete — unittest tests.test_model: 4 passed, including exact notebook forward/loss and original weights.
+Task 2: complete — unittest tests.test_data: 4 passed (hash/split, mixed T sampling, padding, paired roundtrip).
+Task 3: complete — 4 simulation tests pass, including actual CUDA three-animal T10/T11 raw phantom generation and cache reuse.
+Task 4: complete — exact epoch-boundary resume and pipeline reentry pass (2 tests). Fixed safe checkpoint serialization of MultiStepLR's Counter without unsafe pickle loading.
+Task 5: complete — sliding inference, original-domain image/projection metrics, all 13 CLI commands and exports pass integration checks.
+Task 5 finding: from-scratch fp16/public SSIM can overflow the initial GradScaler scale. Preserve public automatic skipped-update/backoff semantics, explicitly log each overflow, reject an entire epoch without a parameter update. Integration fixture uses 8 draws rather than only 2 so scale calibration can finish; fp32 nonfinite gradients still abort.
+Ruling: prior defaults to public MATLAB's phase-count-weighted FDK; all_views_fdk remains an explicit alternative matching the user's previous reconstruction helper. Both use only the mixed measured projections.
+
+Task 6: complete — 36 unittest checks passed without skips on the actual CUDA/TIGRE environment; wheel build and source hashes verified. Independent final review produced six Important issues; focused tests reproduced them before fixes and passed afterward. Added projection aggregation, direct original-function CUDA parity and shifted-source reconstruction/projection checks.
+Review resolutions: reject contradictory phase/calibration/grid import contracts; require same-run identity and historical best for last-checkpoint resume (whole-directory migration supported); canonical sampler case ordering; retries keep the selected animal/case/shape; case selection precedes semantic identity validation; generation request status becomes incomplete before work and records failures.
+Evidence: validation/implementation-tests-final.log; docs/reviews/2026-11-16-implementation-acceptance.md; runs/acceptance-20261116/demo_final/acceptance_status.json; benchmark.json; real_validation.log; real_case_summary.json. Real case is [11,467,256,256] with 600 measured views and a phase-weighted prior, plus two successful optimizer updates per stage on actual prepared patches.
+AMP finding: initial public Stage I scaling on an actual T11 patch needed more than eight draws to settle; the bounded patch check now allows 32 attempts and requires two effective updates. Production epochs already have many draws and explicitly track skipped updates; no loss/schedule fallback was introduced. The first bounded check failure is retained in delivery_checks.log, and the complete rerun is delivery_checks_final.log.
+Scope: full code delivery and bounded execution acceptance complete. The real 63-case 60/30-epoch research experiment and held-out-animal performance are not claimed. One nested animal identity needs an explicit map before selecting that series. User's intentionally different historical GT/CBCT outputs were not altered or treated as defects.

@@ -1,0 +1,10 @@
+# Small but real network/TIGRE integration; no performance claims from this run.
+device: cuda
+amp: true
+threads: 2
+epochs: {'1': 1, '2': 1}
+steps_per_epoch: {'1': 8, '2': 8}
+stage1_patch: [1, 32, 32]
+stage2_patches: [[8, 32, 32]]
+log_every: 1
+loss: {kind: public_code, ssim_weight: 0.1}

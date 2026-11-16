@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "phase_labels": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "intensity_domain": "mu",
+  "mu_water": 0.02,
+  "normalization": {
+    "scale": 0.02,
+    "offset": 0.0
+  },
+  "coordinate_convention": "pig_source_array",
+  "axis_order": "TZYX",
+  "output_spacing_zyx_mm": [
+    0.375,
+    0.4605,
+    0.4605
+  ],
+  "temporal_topology": "ordered_states",
+  "target_kind": "single_phase_full_angle_fdk_v1",
+  "calibration_application": "none",
+  "geometry": {
+    "shape_zyx": [
+      64,
+      256,
+      256
+    ],
+    "voxel_spacing_zyx_mm": [
+      0.375,
+      0.4605,
+      0.4605
+    ],
+    "center_zyx_mm": [
+      0,
+      0,
+      0
+    ],
+    "voxel_to_scanner_zyx": [
+      [
+        0.375,
+        0,
+        0,
+        -11.8125
+      ],
+      [
+        0,
+        0.4605,
+        0,
+        -58.71375
+      ],
+      [
+        0,
+        0,
+        0.4605,
+        -58.71375
+      ],
+      [
+        0,
+        0,
+        0,
+        1
+      ]
+    ]
+  },
+  "source_hashes": {},
+  "generation_profile": "explicit_paired",
+  "full_object_fov": false,
+  "valid_mask_rule": "explicit_mask",
+  "calibration": {
+    "mode": "none",
+    "coefficients": null
+  }
+}

@@ -1,0 +1,10 @@
+Looking in indexes: https://pypi.tuna.tsinghua.edu.cn/simple
+Processing d:\desktop\����2\proj\rstar4d
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: rstar4d-training
+  Building wheel for rstar4d-training (pyproject.toml): started
+  Building wheel for rstar4d-training (pyproject.toml): finished with status 'done'
+  Created wheel for rstar4d-training: filename=rstar4d_training-0.1.0-py3-none-any.whl size=62921 sha256=71e665ea175bcdf271faa76fb04e830cc8080ee1998ccd55e7b7ecf81c5b194c
+  Stored in directory: C:\Users\19599\AppData\Local\Temp\pip-ephem-wheel-cache-eq8mzx29\wheels\53\00\3c\234a55942ee0d090fb9094336efcd575717a854bdb7f7050d8
+Successfully built rstar4d-training

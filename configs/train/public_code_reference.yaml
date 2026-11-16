@@ -1,0 +1,11 @@
+# Legacy arrays must explicitly declare legacy intensity and divide-by-1000 normalization.
+device: cuda
+amp: true
+model_profile: official_v1
+epochs: {'1': 60, '2': 30}
+learning_rate: 0.00015
+milestones: {'1': [20, 30, 40], '2': [10, 20, 25]}
+loss: {kind: public_code, ssim_weight: 0.1}
+normalization: {scale: 1000.0, offset: 0.0}
+stage1_patch: [1, 256, 256]
+stage2_patches: [[16, 256, 256], [32, 144, 144], [64, 128, 128]]

@@ -1,0 +1,26 @@
+test_excluded_ambiguous_identity_does_not_block_selected_case (tests.test_review_regressions.ReviewRegressions) ... ok
+test_failed_expansion_marks_current_request_incomplete (tests.test_review_regressions.ReviewRegressions) ... ok
+test_image_import_rejects_contradictory_contracts (tests.test_review_regressions.ReviewRegressions) ... ok
+test_impossible_selected_animal_cannot_be_silently_skipped (tests.test_review_regressions.ReviewRegressions) ... ok
+test_reordered_manifest_preserves_draws (tests.test_review_regressions.ReviewRegressions) ... ok
+{"event": "epoch", "epoch": 1, "stage": 1, "steps": 2, "train_l1": 0.9364118874073029, "train_total": 0.9364118874073029, "validation_l1": 0.9248326908458363, "validation_animal_l1": 0.9248326908458363, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.2246634000000003, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "valid_fraction": 1.0, "validation_cases": {"b": 0.9248326908458363}}
+test_resume_cannot_write_foreign_or_empty_run (tests.test_review_regressions.ReviewRegressions) ... ok
+{"event": "epoch", "epoch": 1, "stage": 1, "steps": 2, "train_l1": 0.9364118874073029, "train_total": 0.9364118874073029, "validation_l1": 0.9248326908458363, "validation_animal_l1": 0.9248326908458363, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.21174059999999972, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "valid_fraction": 1.0, "validation_cases": {"b": 0.9248326908458363}}
+{"event": "epoch", "epoch": 2, "stage": 1, "steps": 4, "train_l1": 0.9145523607730865, "train_total": 0.9145523607730865, "validation_l1": 0.8990672718394886, "validation_animal_l1": 0.8990672718394886, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.20445650000000004, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "valid_fraction": 1.0, "validation_cases": {"b": 0.8990672718394886}}
+{"event": "epoch", "epoch": 1, "stage": 1, "steps": 2, "train_l1": 0.9364118874073029, "train_total": 0.9364118874073029, "validation_l1": 0.9248326908458363, "validation_animal_l1": 0.9248326908458363, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.21244719999999973, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "valid_fraction": 1.0, "validation_cases": {"b": 0.9248326908458363}}
+{"event": "epoch", "epoch": 2, "stage": 1, "steps": 4, "train_l1": 0.9145523607730865, "train_total": 0.9145523607730865, "validation_l1": 0.8990672718394886, "validation_animal_l1": 0.8990672718394886, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.2104437000000008, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "valid_fraction": 1.0, "validation_cases": {"b": 0.8990672718394886}}
+test_exact_epoch_resume_and_mutation_rejected (tests.test_training.TrainingTests) ... ok
+{"event": "epoch", "epoch": 1, "stage": 1, "steps": 2, "train_l1": 0.9364118874073029, "train_total": 0.9364118874073029, "validation_l1": 0.9248326908458363, "validation_animal_l1": 0.9248326908458363, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.20857879999999973, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "valid_fraction": 1.0, "validation_cases": {"b": 0.9248326908458363}}
+{"event": "epoch", "epoch": 2, "stage": 1, "steps": 4, "train_l1": 0.9145523607730865, "train_total": 0.9145523607730865, "validation_l1": 0.8990672718394886, "validation_animal_l1": 0.8990672718394886, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.20858180000000015, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "valid_fraction": 1.0, "validation_cases": {"b": 0.8990672718394886}}
+{"event": "epoch", "epoch": 1, "stage": 2, "steps": 2, "train_l1": 0.8820309042930603, "train_total": 0.8820309042930603, "validation_l1": 0.8162560896439985, "validation_animal_l1": 0.8162560896439985, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.46286640000000023, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "valid_fraction": 1.0, "validation_cases": {"b": 0.8162560896439985}}
+{"event": "epoch", "epoch": 2, "stage": 2, "steps": 4, "train_l1": 0.7749994695186615, "train_total": 0.7749994695186615, "validation_l1": 0.7178310047496449, "validation_animal_l1": 0.7178310047496449, "lr": 0.00015, "next_lr": 0.00015, "seconds": 0.421424, "peak_allocated_gib": 0.0, "skipped_ssim": 0, "amp_overflows": 0, "optimizer_updates": 2, "valid_fraction": 1.0, "validation_cases": {"b": 0.7178310047496449}}
+test_two_stage_pipeline_reentry (tests.test_training.TrainingTests) ... ok
+test_contract_hash_and_animal_split (tests.test_data.DataTests) ... ok
+test_paired_entry_roundtrip_and_metadata_required (tests.test_data.DataTests) ... ok
+test_sampling_variable_t_and_synchronization (tests.test_data.DataTests) ... ok
+test_small_volume_pad_and_empty_mask (tests.test_data.DataTests) ... ok
+
+----------------------------------------------------------------------
+Ran 12 tests in 6.246s
+
+OK

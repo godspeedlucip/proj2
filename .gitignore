@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.egg-info/
+/build/
+/dist/
+/data/
+/runs/
+/validation/artifacts/
+/.runtime/
+/tmp/
+/RSTAR4D.pdf

@@ -1,0 +1,10 @@
+# Optional paper-description ablation; not the default public-code training.
+device: cuda
+amp: true
+epochs: {'1': 30, '2': 30}
+learning_rate: 0.0001
+scheduler: cosine
+min_lr: 0.00001
+loss: {kind: l1, ssim_weight: 0.0}
+normalization: {scale: 0.02, offset: 0.0}
+stage2_patches: [[16, 256, 256], [32, 144, 144], [64, 128, 128]]

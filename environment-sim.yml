@@ -1,0 +1,20 @@
+name: rstar4d-sim
+channels: [pytorch, nvidia, conda-forge]
+dependencies:
+  - python=3.9
+  - pytorch=2.3.1
+  - pytorch-cuda=11.8
+  - numpy=1.26.3
+  - scipy
+  - h5py
+  - pyyaml
+  - nibabel
+  - tifffile
+  - scikit-image
+  - pillow
+  - pip
+  - pip:
+      - pytorch-msssim==1.0.0
+      - -e .
+# Build official CERN TIGRE separately for this environment/CUDA toolchain.
+# The verified existing environment has pytigre 3.0.0; do not install the unrelated 'tigre' PyPI package.
