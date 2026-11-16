@@ -1,0 +1,7 @@
+# Installed environment record; not an instruction to replace an existing CUDA environment.
+# Python 3.9.23, NVIDIA RTX 4070 Ti SUPER
+torch==2.3.1+cu118
+numpy==1.26.3
+scipy==1.13.1
+nibabel==5.2.1
+pytigre==3.0.0

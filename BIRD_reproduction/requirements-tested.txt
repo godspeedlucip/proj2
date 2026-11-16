@@ -1,0 +1,5 @@
+# Exact versions used in the local CPU validation (Python 3.14.3).
+numpy==2.4.4
+torch==2.11.0
+pytest==8.4.2
+scikit-image==0.26.0

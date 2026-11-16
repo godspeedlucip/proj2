@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bird-ct-reference"
+version = "1.0.0"
+description = "Independent PyTorch reference for the 2026 BIRD dynamic CT paper"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.24", "torch>=2.2"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+metrics = ["scikit-image>=0.22"]
+pig = ["nibabel>=5", "scipy>=1.10"]
+
+[tool.setuptools.packages.find]
+include = ["bird*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

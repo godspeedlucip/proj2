@@ -1,0 +1,31 @@
+{
+  "levels": 16,
+  "features": 2,
+  "base_resolution": 16,
+  "log2_hashmap_size": 19,
+  "spatial_resolution": [
+    512,
+    512,
+    293
+  ],
+  "temporal_resolution": 2500,
+  "width": 32,
+  "latent": 32,
+  "attenuation_activation": "softplus",
+  "initial_attenuation": 0.02,
+  "lambda_tp": 0.1,
+  "lambda_dm": 10.0,
+  "lambda_ts": 0.1,
+  "lambda_rgt": 10.0,
+  "iterations": 64000,
+  "rays_per_batch": 2048,
+  "samples_per_ray": 512,
+  "ray_chunk": 16,
+  "reg_chunk": 1024,
+  "regularization_points": null,
+  "lr_hash": 0.03,
+  "lr_network": 0.003,
+  "seed": 2026,
+  "checkpoint_every": 1000,
+  "log_every": 100
+}

@@ -1,3 +1,22 @@
+# BIRD — dynamic CT reproduction
+
+This `bird` branch includes the independently verified BIRD implementation with TIGRE support.
+
+- [BIRD source and quick start](BIRD_reproduction/README.md)
+- [Network specification](BIRD_reproduction/SPEC.md)
+- [Pig CBCT / TIGRE protocol](BIRD_reproduction/PIG_CBCT_SPEC.md)
+- [Reproduction verification report](BIRD_reproduction/REPRODUCTION_AUDIT.md)
+
+```bash
+cd BIRD_reproduction
+python -m pip install -r requirements.txt
+python -m pytest -q
+```
+
+The original repository content is retained below. Raw data, generated volumes, projections, checkpoints and paper PDFs are not included in this upload.
+
+---
+
 <div align="center">
 <h1 align="center">
 ILV: Iterative Latent Volumes for Fast and Accurate <br> Sparse-View CT Reconstruction
