@@ -2,7 +2,6 @@ from __future__ import annotations
 from collections import defaultdict, Counter
 import contextlib
 import copy
-import csv
 import hashlib
 import json
 import math
@@ -16,12 +15,13 @@ from ..config import validate_train, resolve_stage2
 from ..models import create_model, forward_volume, initialize_stage2, attach_stage2_extensions
 from ..data.contracts import validate_manifest, validate_split, snapshot
 from ..data.context import crop_core
-from ..data.sampling import PatchDataset, validation_samples
-from ..utils.io import atomic_json, append_jsonl, read_json, canonical_hash, sha256, code_fingerprint, environment
+from ..data.sampling import PatchDataset, epoch_draw_budget, validation_samples
+from ..utils.io import atomic_json, append_jsonl, canonical_hash, sha256, code_fingerprint, environment
 from ..utils.seed import seed_all, rng_state, restore_rng
 from .losses import compute_loss, boundary_terms, boundary_scale
 from .motion_losses import motion_terms
-from .checkpoint import atomic_save, load_checkpoint
+from .tensorboard import CardiacAverages, recover_training_events, validation_preview, write_training_epoch
+from .checkpoint import append_metrics_csv, publish_epoch, read_resume, restore_history, run_lock
 
 
 def select_device(name):
@@ -33,7 +33,7 @@ def select_device(name):
 
 def signature(config,data):
     algorithm=copy.deepcopy(config)
-    for key in ['device','workers','pin_memory','log_every']: algorithm.pop(key,None)
+    for key in ['device','workers','pin_memory','log_every','tensorboard']: algorithm.pop(key,None)
     return canonical_hash({'config':algorithm,'data':data,'code':code_fingerprint()})
 
 
@@ -105,6 +105,8 @@ def compute_batch(model, batch, device, stage, resolved, loss_config, epoch, amp
 
 def validate_model(model,records,config,stage,samples,device):
     data=PatchDataset(records,config,stage,0,len(samples),samples)
+    preview = None
+    by_sample = {row.get('sample_id', row['case_id']): row for row in records}
     cases=defaultdict(lambda:{'sum':0.,'count':0,'animal_id':None})
     model.eval()
     with torch.no_grad():
@@ -116,6 +118,10 @@ def validate_model(model,records,config,stage,samples,device):
             if context is not None:
                 pred,target,valid = (crop_core(value,context) for value in (pred,target,valid))
             if not torch.isfinite(pred).all(): raise FloatingPointError(f'Nonfinite validation output: {batch["case_id"]}')
+            if preview is None and config['tensorboard']:
+                image = crop_core(x, context) if context is not None else x
+                sample = batch.get('sample_id', batch['case_id'])[0]
+                preview = validation_preview(image, pred, target, batch, by_sample[sample], config)
             item=cases[batch['case_id'][0]]
             item['sum']+=float((pred.float()-target).abs()[valid].sum())
             item['count']+=int(valid.sum()); item['animal_id']=batch['animal_id'][0]
@@ -125,41 +131,26 @@ def validate_model(model,records,config,stage,samples,device):
     for k,v in cases.items(): animals[v['animal_id']].append(case_values[k])
     animal_values={k:sum(v)/len(v) for k,v in animals.items()}
     return {'l1':sum(case_values.values())/len(case_values),
-        'animal_l1':sum(animal_values.values())/len(animal_values),'cases':case_values,'animals':animal_values}
-
-
-def _write_metrics_csv(path,row):
-    keys=['epoch','stage','steps','train_l1','train_total','validation_l1','validation_animal_l1','lr','seconds','peak_allocated_gib','skipped_ssim']
-    exists=path.exists()
-    with path.open('a',encoding='utf-8',newline='') as f:
-        writer=csv.DictWriter(f,fieldnames=keys)
-        if not exists: writer.writeheader()
-        writer.writerow({k:row[k] for k in keys})
+        'animal_l1':sum(animal_values.values())/len(animal_values),'cases':case_values,'animals':animal_values,
+        'preview':preview}
 
 
 def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_epoch=None):
     """Train one stage; resume is guaranteed at completed epoch boundaries only."""
-    config=validate_train(config); run_dir=Path(run_dir).resolve()
+    run_dir = Path(run_dir).resolve()
+    if resume and Path(resume).resolve().parent.parent in run_dir.parents:
+        raise ValueError('Historical resume requires a new run outside the parent run directory')
+    with run_lock(run_dir):
+        return _train(config,manifest,split,run_dir,stage,resume,init,stop_after_epoch)
+
+
+def _train(config,manifest,split,run_dir,stage,resume,init,stop_after_epoch):
+    config=validate_train(config)
     if stage not in (1,2): raise ValueError('stage must be 1 or 2')
     resolved = resolve_stage2(config,stage)
     if resume and init: raise ValueError('resume and init are mutually exclusive')
-    saved=load_checkpoint(resume) if resume else None
-    if saved and saved['stage']!=stage: raise ValueError('Checkpoint stage mismatch')
-    if saved:
-        # Migration is supported by moving/copying the whole run, never by injecting
-        # one checkpoint into an unrelated destination or losing its historical best.
-        if Path(resume).resolve()!=run_dir/'checkpoints/last.pt':
-            raise ValueError('Resume requires this run directory\'s checkpoints/last.pt; migrate the entire run directory or use a warm start')
-        identity_path=run_dir/'run_identity.json'
-        if not identity_path.is_file() or read_json(identity_path).get('run_id')!=saved.get('run_id'):
-            raise ValueError('Resume run ownership mismatch/missing run identity')
-        best_path=run_dir/'checkpoints/best.pt'
-        if not best_path.is_file(): raise ValueError('Resume requires the historical best.pt from the same run')
-        historical_best=load_checkpoint(best_path)
-        if historical_best.get('run_id')!=saved.get('run_id') or historical_best['signature']!=saved['signature'] or historical_best['best']!=saved['best']:
-            raise ValueError('Resume best/last checkpoint lineage mismatch')
-        run_id=saved['run_id']
-    else: run_id=str(uuid.uuid4())
+    saved, identity, source = read_resume(resume,run_dir) if resume else (None, None, None)
+    if identity and identity['stage']!=stage: raise ValueError('Checkpoint stage mismatch')
     if not resume and run_dir.exists() and any(run_dir.iterdir()): raise FileExistsError('Training directory is nonempty; use resume or a new run')
     sidecars = []
     if resolved['prior']['mode']=='geometry':
@@ -172,7 +163,16 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
     validation=[r for r in rows if str(r['animal_id']) in split['val']]
     if not training or not validation: raise ValueError('Training and validation animals/cases are both required')
     data=snapshot(rows,split); sig=signature(config,data)
-    if saved and saved['signature']!=sig: raise ValueError('Resume rejected: data, split, algorithm/config or implementation changed; use an explicit warm start')
+    if identity and identity['signature']!=sig:
+        raise ValueError('Resume rejected: data, split, algorithm/config or implementation changed; use an explicit warm start')
+    if saved and (saved['model_profile']!=config['model_profile'] or saved['data_snapshot']!=data or saved['split']!=split):
+        raise ValueError('Checkpoint architecture, data snapshot or split mismatch; use an explicit warm start')
+    if identity and not saved:
+        original = identity['initialization']
+        if original.get('path'):
+            if sha256(original['path']) != original['sha256']:
+                raise ValueError('First-epoch initialization weights changed; use a new run')
+            init = {'path':original['path'], 'source_stage':original['source_stage']}
     device=select_device(config['device']); seed_all(config['seed'],config['deterministic'],config['threads'])
     model=create_model(stage,config['model_profile'])
     initialization={'kind':'random','source_stage':None,'sha256':None}
@@ -209,16 +209,28 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
     scheduler=(torch.optim.lr_scheduler.MultiStepLR(optimizer,milestones=config['milestones'][str(stage)],gamma=config['gamma'])
         if config['scheduler']=='multistep' else torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=total_epochs,eta_min=config['min_lr']))
     scaler=torch.cuda.amp.GradScaler(enabled=device.type=='cuda' and config['amp'])
-    start_epoch=1; step=0; best=math.inf
+    samples=saved['validation_samples'] if saved else validation_samples(validation,config,stage)
+    start_epoch=1; step=0; best=math.inf; best_epoch=0
     if saved:
         optimizer.load_state_dict(saved['optimizer'])
         scheduler_state=copy.deepcopy(saved['scheduler'])
         if config['scheduler']=='multistep': scheduler_state['milestones']=Counter(scheduler_state['milestones'])
         scheduler.load_state_dict(scheduler_state); scaler.load_state_dict(saved['scaler'])
-        start_epoch=saved['next_epoch']; step=saved['step']; best=saved['best']; restore_rng(saved['rng'])
+        start_epoch=saved['next_epoch']; step=saved['step']; best=saved['best']; best_epoch=saved['best_epoch']
+        identity=restore_history(source,run_dir,saved,identity)
+        recover_training_events(run_dir, saved['completed_epoch'], config['tensorboard'])
+        restore_rng(saved['rng'])
+    elif identity:
+        if canonical_hash(samples) != identity['validation_samples_sha256']:
+            raise ValueError('First-epoch fixed validation sample mismatch')
+        restore_history(source,run_dir,None,identity)
+        recover_training_events(run_dir, 0, config['tensorboard'])
+    else:
+        identity={'run_id':str(uuid.uuid4()),'stage':stage,'signature':sig,
+                  'manifest':str(Path(manifest).resolve()),'initialization':initialization,
+                  'validation_samples_sha256':canonical_hash(samples)}
+        atomic_json(run_dir/'run_identity.json',identity)
     run_dir.mkdir(parents=True,exist_ok=True); ckdir=run_dir/'checkpoints'; ckdir.mkdir(exist_ok=True)
-    atomic_json(run_dir/'run_identity.json',{'run_id':run_id,'stage':stage,'signature':sig})
-    samples=(saved['validation_samples'] if saved else validation_samples(validation,config,stage))
     # Validation sample identity is part of the checkpoint, including patch shapes/origins.
     atomic_json(run_dir/'resolved_config.json',config); atomic_json(run_dir/'data_snapshot.json',data)
     atomic_json(run_dir/'initialization.json',initialization)
@@ -228,9 +240,11 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
     atomic_json(run_dir/'environment.json',environment())
     if start_epoch>total_epochs:
         return {'stage':stage,'complete':True,'checkpoint':str(ckdir/'best.pt'),'last':str(ckdir/'last.pt'),'epochs':total_epochs}
-    length=config['steps_per_epoch'][str(stage)] or (sum(r['shape'][1] for r in training) if stage==1 else 15*len(training))
+    length=epoch_draw_budget(training,config,stage)
     if length<1: raise ValueError('Empty training epoch')
     final_epoch=total_epochs if stop_after_epoch is None else min(total_epochs,int(stop_after_epoch))
+    if final_epoch < max(1,start_epoch-1):
+        raise ValueError('stop-after-epoch precedes the selected checkpoint or first epoch')
     loss_config={**config['loss'],'normalization_scale':config['normalization']['scale'],'normalization_offset':config['normalization']['offset']}
     try:
         for epoch in range(start_epoch,final_epoch+1):
@@ -240,15 +254,17 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
             loader=_loader(dataset,config,epoch,stage)
             total_loss=0.; total_l1=0.; skipped=0; valid_ratios=[]; amp_overflows=0; epoch_updates=0; shape_counts=Counter(); animal_counts=Counter()
             cardiac_counts=Counter(); draws=hashlib.sha256()
+            cardiac_means = CardiacAverages()
             optimizer.zero_grad(set_to_none=True)
             for index,batch in enumerate(loader):
                 x=batch['input']; valid=batch['valid']
                 context = batch.get('context')
                 shape_counts['x'.join(map(str,x.shape[2:]))]+=1; animal_counts[batch['animal_id'][0]]+=1
                 loss, diagnostics = compute_batch(model,batch,device,stage,resolved,loss_config,epoch,config['amp'])
+                cardiac_means.update(diagnostics)
                 window = {}
                 if context is not None:
-                    window = {'case_id':batch['case_id'][0],'core_origin':batch['origin'][0].tolist(),
+                    window = {'case_id':batch['case_id'][0],'sample_id':batch['sample_id'][0],'core_origin':batch['origin'][0].tolist(),
                               'core_shape':batch['patch_shape'][0].tolist(),'window_origin':context['origin'][0].tolist(),
                               'window_shape':list(x.shape[-3:]),'phase_labels':context['phase_labels'][0].tolist(),
                               'left_context_vox':context['core_bounds'][0,:,0].tolist(),
@@ -264,6 +280,9 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
                         cardiac_counts[structure+'_gradient'] += values['gradient']
                     append_jsonl(run_dir/'cardiac_samples.jsonl',{'epoch':epoch,'draw':index,'animal_id':batch['animal_id'][0],
                                                                   **window,**diagnostics})
+                else:
+                    draw = [batch['sample_id'][0], batch['origin'][0].tolist(), batch['patch_shape'][0].tolist()]
+                    draws.update(json.dumps(draw).encode())
                 if not torch.isfinite(loss['total']): raise FloatingPointError(f'Nonfinite loss at {batch["case_id"]}, epoch={epoch}, draw={index}')
                 # Average over the actual size of each accumulation group, including the final short group.
                 group_start=(index//config['accumulation'])*config['accumulation']
@@ -283,43 +302,47 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
                         # reduce the scale, and explicitly record it. Never save a zero-update epoch.
                         amp_overflows+=1
                         append_jsonl(run_dir/'train.jsonl',{'event':'amp_overflow','epoch':epoch,'draw':index,
-                            'case_id':batch['case_id'][0],'scale_before':previous_scale,'scale_after':scaler.get_scale()})
+                            'case_id':batch['case_id'][0],'sample_id':batch['sample_id'][0],'scale_before':previous_scale,'scale_after':scaler.get_scale()})
                 total_loss+=float(loss['total'].detach()); total_l1+=float(loss['l1'].detach()); skipped+=int(loss['skipped_ssim'])
                 valid_ratios.append(float(crop_core(valid,context).float().mean() if context is not None else valid.float().mean()))
                 if (index+1)%config['log_every']==0 or index+1==length:
                     append_jsonl(run_dir/'train.jsonl',{'event':'batch','epoch':epoch,'stage':stage,'draw':index,'step':step,
-                        'case_id':batch['case_id'][0],'shape':list(x.shape),'l1':float(loss['l1'].detach()),
+                        'case_id':batch['case_id'][0],'sample_id':batch['sample_id'][0],'shape':list(x.shape),'l1':float(loss['l1'].detach()),
                         'total':float(loss['total'].detach()),'valid_fraction':valid_ratios[-1],'skipped_ssim':loss['skipped_ssim']})
             if skipped==length and loss_config['kind']!='l1' and loss_config['ssim_weight']>0:
                 raise ValueError('No valid SSIM windows during entire epoch; change explicit patch/mask/loss configuration')
             if epoch_updates==0: raise FloatingPointError('No optimizer updates in epoch: AMP overflow calibration exhausted the tiny epoch; use more draws or explicit fp32')
             evaluation=validate_model(model,validation,config,stage,samples,device)
             improved=evaluation['l1']<best
-            if improved: best=evaluation['l1']
+            if improved: best=evaluation['l1']; best_epoch=epoch
             lr_used=optimizer.param_groups[0]['lr']; scheduler.step()
             entry={'event':'epoch','epoch':epoch,'stage':stage,'steps':step,'train_l1':total_l1/length,
                 'train_total':total_loss/length,'validation_l1':evaluation['l1'],'validation_animal_l1':evaluation['animal_l1'],
                 'lr':lr_used,'next_lr':optimizer.param_groups[0]['lr'],'seconds':time.perf_counter()-begin,
                 'peak_allocated_gib':torch.cuda.max_memory_allocated(device)/1024**3 if device.type=='cuda' else 0.,
                 'skipped_ssim':skipped,'amp_overflows':amp_overflows,'optimizer_updates':epoch_updates,
-                'sample_count':length,'shape_counts_tzyx':dict(shape_counts),'animal_draw_counts':dict(animal_counts),
+                'sample_count':length,'sampling_sha256':draws.hexdigest(),
+                'shape_counts_tzyx':dict(shape_counts),'animal_draw_counts':dict(animal_counts),
                 'valid_fraction':sum(valid_ratios)/len(valid_ratios),'validation_cases':evaluation['cases']}
             if getattr(dataset,'contextual',False):
-                entry.update(cardiac=dict(cardiac_counts), sampling_sha256=draws.hexdigest(),
+                entry.update(cardiac=dict(cardiac_counts), cardiac_means=cardiac_means.values(),
                              trainable_parameters=sum(p.numel() for p in model.parameters() if p.requires_grad))
-            payload={'schema_version':1,'checkpoint_kind':'training','run_id':run_id,'state_dict':model.state_dict(),'stage':stage,
+            payload={'schema_version':1,'checkpoint_kind':'training','run_id':identity['run_id'],'state_dict':model.state_dict(),'stage':stage,
                 'model_profile':config['model_profile'],'completed_epoch':epoch,'next_epoch':epoch+1,'step':step,
                 'stage_complete':epoch==total_epochs,'optimizer':optimizer.state_dict(),'scheduler':scheduler.state_dict(),
-                'scaler':scaler.state_dict(),'best':best,'rng':rng_state(),'config':config,'signature':sig,
+                'scaler':scaler.state_dict(),'best':best,'best_epoch':best_epoch,'epoch_metrics':entry,
+                'rng':rng_state(),'config':config,'signature':sig,
                 'data_snapshot':data,'validation_samples':samples,'initialization':initialization,
                 'manifest':str(Path(manifest).resolve()),'split':split,'environment':environment(),
                 'code_fingerprint':code_fingerprint(),'normalization':config['normalization'],
                 'intensity_domain':rows[0]['metadata']['intensity_domain'],'calibration_application':rows[0]['metadata']['calibration_application']}
+            if evaluation['preview'] is not None:
+                payload['tensorboard_preview'] = evaluation['preview']
             if stage==2:
                 payload['stage2_resolved']=resolved
-            if improved: atomic_save(ckdir/'best.pt',payload)
-            atomic_save(ckdir/'last.pt',payload)
-            append_jsonl(run_dir/'train.jsonl',entry); _write_metrics_csv(run_dir/'metrics.csv',entry)
+            publish_epoch(ckdir,payload)
+            write_training_epoch(run_dir, payload)
+            append_jsonl(run_dir/'train.jsonl',entry); append_metrics_csv(run_dir/'metrics.csv',entry)
             print(json.dumps(entry,ensure_ascii=False),flush=True)
         atomic_json(run_dir/'status.json',{'stage':stage,'completed_epoch':final_epoch,'complete':final_epoch==total_epochs})
     except Exception as exc:

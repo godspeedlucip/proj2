@@ -7,7 +7,7 @@ name = "rstar4d-training"
 version = "0.1.0"
 description = "Reproducible RSTAR4D training with TIGRE simulation and paired-data ingestion"
 requires-python = ">=3.9"
-dependencies = ["torch>=2.3,<3", "numpy>=1.23,<3", "scipy>=1.9", "h5py>=3.8", "PyYAML>=6", "nibabel>=5", "tifffile>=2023", "pytorch-msssim==1.0.0", "scikit-image>=0.20", "Pillow>=9"]
+dependencies = ["torch>=2.3,<3", "tensorboard>=2.12,<3", "numpy>=1.23,<3", "scipy>=1.9", "h5py>=3.8", "PyYAML>=6", "nibabel>=5", "tifffile>=2023", "pytorch-msssim==1.0.0", "scikit-image>=0.20", "Pillow>=9"]
 
 [project.scripts]
 rstar4d = "rstar4d.cli:main"

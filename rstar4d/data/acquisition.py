@@ -2,7 +2,7 @@
 import h5py
 import numpy as np
 
-from ..utils.io import read_json
+from ..utils.io import canonical_hash, read_json
 
 
 ENCODING = 'angles_v1'
@@ -52,11 +52,31 @@ def load_geometry(record, phase_labels, *, allow_diagnostic_swap=True):
                 raise ValueError('Angle summary belongs to a different paired volume')
             if saved.get('diagnostic_swap') and not allow_diagnostic_swap:
                 raise ValueError('Swapped angle summaries are reserved for inference diagnostics')
+            layout = record.get('cardiac_layout')
+            if layout:
+                if (saved.get('layout') != layout['layout'] or saved.get('actual_indices') != layout['actual_indices']
+                        or saved.get('phase') != layout['phase']
+                        or saved.get('source_paired_sha256') != layout['reference_paired_sha256']
+                        or saved.get('projections_sha256') != layout['source_projections_sha256']):
+                    raise ValueError('Angle summary does not match the measured layout provenance')
+                if not saved.get('diagnostic_swap') and (saved.get('encoded_indices') != layout['actual_indices']
+                        or ('correct_angles_sha256' in layout and canonical_hash(saved['values']) != layout['correct_angles_sha256'])):
+                    raise ValueError('Angle summary does not encode the selected projection indices')
             result = np.asarray(saved['values'],dtype=np.float32)
             if result.shape != (len(phase_labels), 14) or not np.isfinite(result).all():
                 raise ValueError('Invalid angle summary shape or values')
             return result
+        layout = record.get('cardiac_layout',{})
+        # validate_manifest hashes the raw sidecar before training or inference.
+        # Bind that verified file to the acquisition that produced the paired FDK.
+        if layout and (not record.get('projections_sha256')
+                       or record['projections_sha256']!=layout['source_projections_sha256']):
+            raise ValueError('Raw projection source differs from the measured layout')
         with h5py.File(record['projections'], 'r') as source:
-            return angle_summary(source['angles_rad'][:], source['state_label'][:], phase_labels)
+            result = angle_summary(source['angles_rad'][:],source['state_label'][:],phase_labels,
+                                   selected_indices=layout.get('actual_indices'),selected_phase=layout.get('phase'))
+        if 'correct_angles_sha256' in layout and canonical_hash(result.tolist())!=layout['correct_angles_sha256']:
+            raise ValueError('Raw angles do not encode the measured selected projection indices')
+        return result
     except (OSError, KeyError, ValueError) as exc:
         raise ValueError(f'{record["case_id"]}: geometry requires valid acquired angles: {exc}') from exc

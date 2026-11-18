@@ -32,7 +32,10 @@ def parser():
         d=sub.add_parser(command); d.add_argument('--config'); d.add_argument('--manifest'); d.add_argument('--split'); d.add_argument('--run-dir')
         if command=='train':
             d.add_argument('--stage',type=int,choices=[1,2]); d.add_argument('--stop-after-epoch',type=int)
-            group=d.add_mutually_exclusive_group(); group.add_argument('--resume'); group.add_argument('--init-from-stage1'); group.add_argument('--init-from-stage2')
+            group=d.add_mutually_exclusive_group()
+            group.add_argument('--resume',metavar='CHECKPOINT',
+                               help='Resume last.pt or the latest epoch in place. An older epoch-NNNN.pt requires --run-dir for a new run.')
+            group.add_argument('--init-from-stage1'); group.add_argument('--init-from-stage2')
     d=sub.add_parser('infer'); d.add_argument('--checkpoint',required=True); d.add_argument('--manifest',required=True); d.add_argument('--out',required=True)
     d.add_argument('--split'); d.add_argument('--split-name',choices=['train','val','test','all'],default='test'); d.add_argument('--mode',choices=['full','tiled'],default='tiled')
     d.add_argument('--tile',nargs=3,type=int); d.add_argument('--overlap',nargs=3,type=int); d.add_argument('--device',default='cuda'); d.add_argument('--fp32',action='store_true'); d.add_argument('--export',nargs='+',choices=['h5','tif','nii'],default=['h5'])
@@ -147,9 +150,9 @@ def dispatch(args):
     if command in ('train','pipeline'):
         from .training.trainer import train
         from .training.pipeline import pipeline
-        from .training.checkpoint import load_checkpoint
+        from .training.checkpoint import resume_defaults
         if command=='train' and args.resume:
-            ck=load_checkpoint(args.resume); cfg=load_config(args.config) if args.config else ck['config']
+            ck=resume_defaults(args.resume); cfg=load_config(args.config) if args.config else ck['config']
             return train(cfg,args.manifest or ck['manifest'],args.split or ck['split'],args.run_dir or Path(args.resume).resolve().parents[1],
                 args.stage or ck['stage'],resume=args.resume,stop_after_epoch=args.stop_after_epoch)
         if not all([args.manifest,args.split,args.run_dir]): raise ValueError('manifest, split and run-dir are required for new training')

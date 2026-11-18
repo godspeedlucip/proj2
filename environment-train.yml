@@ -12,6 +12,7 @@ dependencies:
   - tifffile
   - scikit-image
   - pillow
+  - tensorboard
   - pip
   - pip:
       - pytorch-msssim==1.0.0

@@ -5,7 +5,7 @@ import contextlib
 import numpy as np
 import torch
 from ..models import forward_volume
-from ..data.context import plan_window
+from ..data.context import STAGE2_ALIGNMENT, check_support, plan_window
 
 
 def starts(length,tile,overlap,alignment):
@@ -63,7 +63,7 @@ def predict_volume(model,cbct,prior,normalization,mode='tiled',tile=(32,128,128)
     else:
         tile=list(tile); overlap=list(overlap)
         if stage==1: tile[0]=1; overlap[0]=0
-        alignment=(1 if stage==1 else 2,8,8)
+        alignment=(1,8,8) if stage==1 else STAGE2_ALIGNMENT
         positions=[starts(n,k,o,a) for n,k,o,a in zip((z,y,x),tile,overlap,alignment)]
         result=np.zeros(cbct.shape,np.float32); denominator=np.zeros((z,y,x),np.float32)
         weight=gaussian_weight(tile)
@@ -73,6 +73,9 @@ def predict_volume(model,cbct,prior,normalization,mode='tiled',tile=(32,128,128)
             clipped=tuple(slice(0,n) for n in real); w=weight[clipped]
             if contextual:
                 window=plan_window((z,y,x),origin,real,recipe['recipe'])
+                domains = context or {}
+                check_support(window,recipe['recipe'],domains.get('source_fov'),domains.get('case_id','inference'),
+                              prior_fov=domains.get('prior_fov'),volume_shape=(z,y,x))
                 output=extract(window.slices,window.origin,[(0,0)]*3)
                 core=output[(slice(None),*window.core)]
             else:

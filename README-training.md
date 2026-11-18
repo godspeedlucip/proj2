@@ -9,7 +9,13 @@
 - 在指标 YAML 的 `contours.surface_dice_tolerance_vox` 中为两个结构填写锁定容差，用 `evaluate --contours CONTOURS --metric-config METRICS` 输出轮廓指标。最后用 `python -m experiments.cardiac_ablation compare --runs RUNS --out REPORT` 按动物报告配对差值。
 - `angle-layouts` 从同一混合扫描按两个等量角度子集重建一个状态，并分别导出实际几何和交换几何诊断清单。`diagnose-prior` 接收验证病例对照清单，每行含 `case_id`、`animal_id`、`path`、`sha256`，指向同一网格的 NPZ，含已归一化的 `dynamic[T,Z,Y,X]`、`matched[Z,Y,X]`、`mismatched[Z,Y,X]`、`source_fov[T,Z,Y,X]`、`prior_fov[Z,Y,X]` 及几何模式的 `geometry[T,14]`。
 
-[设计规格](docs/superpowers/specs/2026-11-18-rstar4d-cardiac-contour-ablation-design.md) · [实施计划](docs/superpowers/plans/2026-11-18-rstar4d-cardiac-contour-ablation.md)
+[设计规格](docs/superpowers/specs/2026-11-18-rstar4d-cardiac-contour-ablation-design.md) · [实施计划](docs/superpowers/plans/2026-11-18-rstar4d-cardiac-contour-ablation.md) · [训练、续训及八组体模验收记录](docs/reviews/2026-11-18-rstar-advance-training-acceptance.md)
+
+`angle-layouts` 同时导出 `manifest-joint.jsonl`，其中 A、B 都使用各自实际投影的角度摘要。两行共享 `animal_id` 和原始 `case_id`，各有唯一 `sample_id`，推理输出使用样本 ID 命名。多布局预测的独立轮廓清单也要填写对应的 `sample_id`。将联合清单中的训练样本与独立验证动物一起写入训练清单，split 仍按动物指定。训练按动物、原病例、布局依次采样，同病例增加布局时维持每轮预算。
+
+`metrics_by_phase.csv` 保存每相位的全图指标和有效分母；`compare` 的 `paired_phase_summary.csv` 和 `paired_by_phase.csv` 分别列出逐相位配对的汇总和明细。组间默认在相同布局上配对，显式指定 `--layout-pair B A` 可比较候选组 B 布局与参考组 A 布局。同一相位只有在双方该项指标都有定义时才进入有效相位数。旧评价目录只有病例级指标时，相位数为 `null`，可复用原预测重新执行 `evaluate`。
+
+匹配与错配 prior 的诊断按相位报告从有效目标、单粗候选、正细采样支撑、等细点数到值幅匹配的留存数。可以在下文的八组体模运行结束后执行 `python -m validation.prior_controls --smoke runs/cardiac-demo --out runs/cardiac-prior-demo`，对比原零点体模与具有连续插值支撑的正对照。两组门控和修正量的差值保留实际方向。
 
 本工程以公开Notebook为算法依据：原网络/state_dict、circular时间填充、Stage I跳过z、Stage II原Dirac/零初始化、L1＋0.1×(1−SSIM)、Adam 1.5e-4、60/30轮及原分段学习率。原Notebook和权重保留在 `RSTAR/githubcode/`。
 
@@ -92,7 +98,26 @@ prepared HDF5数组：`cbct/target/valid_mask [T,Z,Y,X]`、`prior [Z,Y,X]`，可
 
 `pipeline`自动Stage I best→Stage II初始化→Stage II训练。对同一run重新运行会恢复已完成epoch，不会重复初始化z或覆盖已完成Stage II。单阶段使用 `train --stage 1`；Stage II指定 `--init-from-stage1 ...` 或 `--init-from-stage2 ...`，二者与 `--resume` 互斥。公开裸state_dict只可用于显式初始化，不能作为resume。
 
-Checkpoint包含模型、Adam、scheduler、GradScaler、RNG、固定验证块、数据/划分指纹和配置。保证epoch边界的CPU确定性恢复；中途batch中断会从上个完整epoch开始。不保证跨GPU/软件版本逐位相同。除device/workers/pin_memory/log_every等运行选项和经哈希匹配的路径迁移外，改变算法或数据会拒绝resume。恢复必须指向目标run自己的`checkpoints/last.pt`，并匹配`run_identity.json`与历史`best.pt`；迁移时复制整个run目录。不能把单个checkpoint恢复到另一非空run。需要修改实验时选择新run并显式warm-start。
+两个 Stage 都在每轮完成训练和验证后保存独立的完整归档 `checkpoints/epoch-0001.pt`、`epoch-0002.pt` 等。`last.pt` 用于继续最新训练，`best.pt` 对应验证病例等权 L1 最低的轮次。归档含权重、Adam、学习率调度器、AMP GradScaler、随机状态、已完成轮次、累计更新数、固定验证样本及数据、划分和配置签名。从较早轮次继续时指定新的实验目录。例如从第 3 轮的状态启动第 4 轮：
+
+```powershell
+& $py -m rstar4d train --resume runs/pig_001/stage2/checkpoints/epoch-0003.pt --run-dir runs/pig_stage2_from_epoch3
+```
+
+恢复以完整轮次为边界。第 8 轮中途退出时，第 8 轮从第一个样本重算。迁移训练时复制整个 Stage 目录。恢复会核对训练身份、历史最优、数据签名和算法版本，确定性 CPU 设置可用于逐值核验连续与恢复训练。
+
+### TensorBoard 观测
+
+正常训练默认启用 TensorBoard，并在每个 Stage 或消融组的 `tensorboard/` 下发布逐轮事件。可用合成体模观察完整流程。在仓库目录运行：
+
+```powershell
+& $py -m validation.cardiac_smoke --out runs/cardiac-demo
+& $py -m tensorboard.main --logdir runs/cardiac-demo
+```
+
+使用新的体模输出目录。TensorBoard 的 Scalars 支持叠加 baseline、M、P、B 和联合组的同名曲线。横轴是完成的 epoch。`train/`、`validation/`、`optimizer/` 和 `resources/` 显示损失、有效更新、AMP 溢出、学习率及资源使用。`loss/` 显示按有效支撑汇总的辅助损失，配合 `support/` 中的窗口数、命中块数和体素数观察；无有效监督时只报告计数。Images 固定验证块、相位、切片及窗宽，每轮显示稀疏图、prior、预测、参考图和绝对误差。可信表面存在时在预测上以橙色绘整心外表面、青色绘 LV。独立轮廓评价在 `evaluation/tensorboard/` 写入各结构指标和每种指标的有效动物数。
+
+同一轮的事件文件随完整 checkpoint 发布，续训时可从归档补回缺失事件。关闭训练可视化可设置 `tensorboard: false`。训练日志、事件文件和模型权重均写到本地 run 目录。
 
 Stage I默认每epoch的draw数为训练病例z层数之和，Stage II为15×病例数；先均匀选动物，再选病例和空间位置。全部T保留，batch=1。病例顺序规范化，manifest重排不改变抽样。每个draw固定动物/病例/块尺寸，只重试空间位置；32次仍不满足有效比例则报错，不静默跳过动物。验证使用固定样本，best按病例等权L1选择，同时记录动物等权L1。`small_volume: error`默认拒绝过小体积；显式`pad`只在高索引端复制填充输入，并将padding的valid设为0。
 
@@ -118,6 +143,6 @@ Stage I默认每epoch的draw数为训练病例z层数之和，Stage II为15×病
 & $py -m unittest discover -s tests -v
 ```
 
-不依赖pytest。测试包含公开权重/前向/loss对照、动物泄漏、mask、T10/T11、真实TIGRE、两条入口的完整CLI流程、续训一致性和滑窗/指标。CUDA不可用时仅GPU测试跳过，不能据此声称TIGRE验证通过。本机36项测试通过且无跳过。具体范围见 [实现验收报告](D:/desktop/课题2/proj/RSTAR4D/docs/reviews/2026-11-16-implementation-acceptance.md)。可用 `python -m validation.run_delivery_checks --out runs/my_acceptance` 一次执行并保存两条入口的完整小体模产物。
+测试覆盖公开权重、前向和损失对照、动物划分、mask、T10/T11、TIGRE 投影与 FDK、两条 CLI 入口、续训、滑窗和指标。CUDA 不可用时会跳过 GPU 测试。本机此次 88 项通过、0 项跳过，详见[训练可靠性与体模验收记录](docs/reviews/2026-11-18-rstar-advance-training-acceptance.md)。早期基线见[实现验收报告](docs/reviews/2026-11-16-implementation-acceptance.md)。可用 `python -m validation.run_delivery_checks --out runs/my_acceptance` 执行并保存两条入口的小体模产物。
 
 配置YAML内路径相对YAML所在目录，manifest路径相对manifest所在目录，CLI路径相对当前工作目录。未知配置字段、损坏权重、缺失元数据、非有限值会明确失败。

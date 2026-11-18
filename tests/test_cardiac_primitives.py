@@ -83,7 +83,7 @@ class CardiacPrimitivesTests(unittest.TestCase):
     def test_missing_real_context_is_distinguished_from_outside_fov(self):
         from dataclasses import replace
         from rstar4d.data.context import plan_window, check_support
-        recipe = {'max_displacement_vox':[2]*3,'lncc_radius_vox':[1]*3,'support_margin_vox':[1]*3}
+        recipe = {'max_displacement_vox':[2]*3,'lncc_radius_vox':[1]*3,'support_margin_vox':[31,36,36]}
         domain = np.ones((2,12,16,16),dtype=bool)
         correctly_read = plan_window(domain.shape[-3:],(1,5,5),(4,6,6),recipe)
         shortened = replace(correctly_read,origin=(1,*correctly_read.origin[1:]))
@@ -91,6 +91,31 @@ class CardiacPrimitivesTests(unittest.TestCase):
             check_support(shortened,recipe,domain,'pig-x')
         domain[:,0] = False
         check_support(shortened,recipe,domain,'pig-x')
+
+    def test_zero_margin_does_not_validate_itself(self):
+        from rstar4d.data.context import plan_window, check_support
+        recipe = config.resolve_stage2(config.validate_train({}),2)['recipe']
+        recipe['support_margin_vox'] = [0]*3
+        shape = (32,48,144)
+        valid = np.ones((2,*shape),bool)
+        window = plan_window(shape,(0,0,0),(32,48,16),recipe)
+        with self.assertRaisesRegex(ValueError,r'phantom.*X.*right.*[1-9]\d* vox'):
+            check_support(window,recipe,valid,'phantom')
+        valid[...,window.stop[-1]:] = False
+        check_support(window,recipe,valid,'phantom')
+        prior_valid = np.ones(shape,bool)
+        with self.assertRaisesRegex(ValueError,'phantom.*X.*right'):
+            check_support(window,recipe,valid,'phantom',prior_fov=prior_valid)
+
+    def test_x2_support_uses_full_scan_feature_grid_and_fractional_displacements(self):
+        from rstar4d.data.context import required_window
+        # conv1..conv3 downsample independently in Z (2,1,1) and XY (1,2,2).
+        # Their per-level radii are 9+10+10 in Z and 5+9+18 in XY.
+        shape,origin,core = (200,240,300),(80,80,88),(8,16,24)
+        recipe = {'max_displacement_vox':[1.5,4.25,6.75],'lncc_radius_vox':[1,2,3]}
+        required = required_window(shape,origin,core,recipe)
+        self.assertEqual(required.origin,(46,40,40))
+        self.assertEqual(required.stop,(120,144,160))
 
     def test_boundary_averages_structures_and_ramps(self):
         self.assertTrue(hasattr(losses, 'boundary_terms'))

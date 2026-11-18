@@ -4,11 +4,12 @@ import math
 from pathlib import Path
 import yaml
 from .utils.io import resolve
+from .data.context import STAGE2_ALIGNMENT, X2_STRIDE
 
 
 def train_defaults():
     return {'seed':2026,'device':'cuda','workers':0,'pin_memory':False,'log_every':10,'threads':4,
-        'deterministic':False,'amp':True,'model_profile':'official_v1',
+        'deterministic':False,'amp':True,'tensorboard':True,'model_profile':'official_v1',
         'epochs':{'1':60,'2':30},'learning_rate':.00015,'milestones':{'1':[20,30,40],'2':[10,20,25]},
         'gamma':.5,'scheduler':'multistep','min_lr':.00001,'betas':[.9,.999],'weight_decay':0.,
         'loss':{'kind':'public_code','ssim_weight':.1,'window':[0.,.05]},
@@ -55,6 +56,8 @@ def merge_strict(defaults,values,path=''):
 
 def validate_train(cfg):
     cfg=merge_strict(train_defaults(),cfg)
+    if type(cfg['tensorboard']) is not bool:
+        raise ValueError('tensorboard must be a boolean')
     if cfg['model_profile'] not in ('official_v1','pig_ordered_v1'): raise ValueError('Unknown model profile')
     if cfg['loss']['kind'] not in ('public_code','l1','physical_ssim'): raise ValueError('Unknown loss kind')
     if cfg['scheduler'] not in ('multistep','cosine'): raise ValueError('Unknown scheduler')
@@ -130,7 +133,8 @@ def resolve_stage2(config: dict, stage: int) -> dict:
     if not boundary['enabled']:
         boundary['weight'] = boundary['grad_weight_vox'] = 0.
     recipe = {**copy.deepcopy(config['stage2_context']), 'max_displacement_vox': motion['max_displacement_vox'],
-              'alignment': [2,8,8], 'feature_stride': [2,4,4], 'core_shapes': copy.deepcopy(config['stage2_patches'])}
+              'alignment': list(STAGE2_ALIGNMENT), 'feature_stride': list(X2_STRIDE),
+              'core_shapes': copy.deepcopy(config['stage2_patches'])}
     return {'crop_mode': config['stage2_crop_mode'] if stage == 2 else 'legacy',
             'motion': motion, 'prior': prior, 'boundary': boundary, 'recipe': recipe,
             'version': 'cardiac_v1', 'distance_unit': 'output_voxel',

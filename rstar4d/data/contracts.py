@@ -104,7 +104,10 @@ def validate_case(path,require_target=True,full=True):
                         if name=='roi_labels' and (not np.issubdtype(block.dtype,np.integer) or np.any(block<0)):
                             raise ValueError('ROI labels must be nonnegative integers')
             if valid_count==0: raise ValueError('Case has no valid voxels')
-        return {'shape':list(shape),'metadata':meta}
+        info = {'shape':list(shape),'metadata':meta}
+        if 'cardiac_layout_json' in f.attrs:
+            info['cardiac_layout'] = json.loads(f.attrs['cardiac_layout_json'])
+        return info
 
 
 def write_case(path,cbct,prior,target,valid,meta,roi_labels=None,prior_valid_mask=None):
@@ -125,15 +128,27 @@ def write_case(path,cbct,prior,target,valid,meta,roi_labels=None,prior_valid_mas
     os.replace(temp,path)
 
 
+def sample_id(row):
+    return row.get('sample_id',row['case_id'])
+
+
 def read_manifest(path):
     path=Path(path).resolve(); rows=read_jsonl(path)
     if not rows: raise ValueError('Empty manifest')
     seen=set()
+    owners={}
     for row in rows:
         safe_id(row['case_id'])
-        if row['case_id'] in seen: raise ValueError('Duplicate case_id')
-        seen.add(row['case_id'])
+        identifier = sample_id(row)
+        if not isinstance(identifier,str):
+            raise ValueError('sample_id must be a string')
+        row['sample_id'] = safe_id(identifier)
+        if identifier in seen: raise ValueError(f'Duplicate sample_id: {identifier}')
+        seen.add(identifier)
         if not str(row.get('animal_id','')).strip(): raise ValueError('Missing animal_id')
+        owner = owners.setdefault(row['case_id'],str(row['animal_id']))
+        if owner!=str(row['animal_id']):
+            raise ValueError(f'{row["case_id"]}: samples of one case cannot belong to different animals')
         row['path']=str(resolve(row['path'],path.parent))
         for key in ('projections','annotations','angle_summary'):
             if row.get(key): row[key]=str(resolve(row[key],path.parent))
@@ -145,7 +160,10 @@ def write_manifest(path,rows):
     for item in rows:
         row=dict(item)
         for key in ['path','projections','annotations','angle_summary']:
-            if row.get(key): row[key]=os.path.relpath(Path(row[key]).resolve(),path.parent).replace('\\','/')
+            if row.get(key):
+                target = Path(row[key]).resolve()
+                row[key] = (target.as_posix() if target.drive.casefold()!=path.drive.casefold()
+                            else Path(os.path.relpath(target,path.parent)).as_posix())
         output.append(row)
     atomic_jsonl(path,output)
 
@@ -169,6 +187,12 @@ def validate_manifest(path,split=None,require_target=True,full=True,
     for row in rows:
         if not row.get('sha256') or sha256(row['path'])!=row['sha256']: raise ValueError(f'Data hash mismatch: {row["case_id"]}')
         info=validate_case(row['path'],require_target,full)
+        layout = info.get('cardiac_layout')
+        if layout:
+            for key in ('layout','actual_indices','reference_paired_sha256','source_projections_sha256'):
+                if key in row and row[key]!=layout[key]:
+                    raise ValueError(f'{sample_id(row)}: manifest {key} disagrees with paired layout provenance')
+            row['layout'] = layout['layout']
         row.update(info)
         for kind in sidecars:
             if kind=='projections' and prefer_angle_summary and row.get('angle_summary'):
@@ -188,6 +212,7 @@ def validate_manifest(path,split=None,require_target=True,full=True,
 
 def snapshot(rows,split):
     return {'cases':[{**{k:r.get(k) for k in ['case_id','animal_id','sha256','projections_sha256']},
-                      **{k:r[k] for k in ('annotations_sha256','angle_summary_sha256') if k in r}}
-                     for r in sorted(rows,key=lambda r:r['case_id'])],
+                      **({'sample_id':sample_id(r)} if sample_id(r)!=r['case_id'] else {}),
+                      **{k:r[k] for k in ('layout','annotations_sha256','angle_summary_sha256') if k in r}}
+                     for r in sorted(rows,key=sample_id)],
             'split':split}

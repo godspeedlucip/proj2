@@ -6,7 +6,7 @@ import time
 import torch
 
 from ..config import resolve_stage2
-from ..data.contracts import validate_manifest, validate_split
+from ..data.contracts import sample_id, validate_manifest, validate_split
 from ..data.context import plan_window
 from ..data.sampling import InvalidCore, PatchDataset, validation_samples
 from ..models import create_model, attach_stage2_extensions, initialize_stage2
@@ -110,7 +110,8 @@ def benchmark_manifest(config, manifest, split, steps, weights=None, memory_limi
                 return window.stop[axis]-window.origin[axis]
             positions = range(max(0,mid[axis]-a),min(volume[axis]-shape[axis],mid[axis]+a)+1)
             largest_origin[axis] = max(positions,key=extent)
-        interior = [{'case_id':largest[0]['case_id'],'origin':largest_origin,'shape':shape}]
+        interior = [{'case_id':largest[0]['case_id'],'sample_id':sample_id(largest[0]),
+                     'origin':largest_origin,'shape':shape}]
         try:
             candidate = next(iter(_loader(PatchDataset(largest,local,2,0,1,interior),local,0,2)))
         except InvalidCore:
@@ -118,7 +119,8 @@ def benchmark_manifest(config, manifest, split, steps, weights=None, memory_limi
         if candidate is not None and candidate['input'].numel()>batch['input'].numel():
             batch = candidate
         context = batch['context']
-        info = {'case_id':batch['case_id'][0],'core_shape':shape,'phases':batch['input'].shape[2],
+        info = {'case_id':batch['case_id'][0],'sample_id':batch['sample_id'][0],
+                'core_shape':shape,'phases':batch['input'].shape[2],
                 'core_origin':batch['origin'][0].tolist(),'window_origin':context['origin'][0].tolist(),
                 'window_shape':list(batch['input'].shape[-3:]),'amp':config['amp'],
                 'left_context_vox':context['core_bounds'][0,:,0].tolist(),

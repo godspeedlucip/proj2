@@ -56,13 +56,16 @@ def predict_manifest(checkpoint,manifest,out,split_name='test',mode='tiled',tile
         if meta['normalization']!=ck['normalization'] or meta['intensity_domain']!=ck['intensity_domain']:
             raise ValueError('Checkpoint/data intensity or normalization mismatch')
         if meta['calibration_application']!=ck.get('calibration_application',meta['calibration_application']): raise ValueError('Calibration application mismatch')
-        folder=out/row['case_id']; folder.mkdir()
+        identity = {'sample_id':row['sample_id'],'case_id':row['case_id'],'animal_id':row['animal_id']}
+        if 'layout' in row:
+            identity['layout'] = row['layout']
+        folder=out/row['sample_id']; folder.mkdir()
         path=folder/'prediction.h5'; temp=folder/'prediction.partial'
         with h5py.File(row['path'],'r') as f:
             context = None
             geometry_source = None
             if use_context:
-                context={'source_fov':f['valid_mask'],'prior_fov':f.get('prior_valid_mask'),'phase_labels':meta['phase_labels']}
+                context={'case_id':row['case_id'],'source_fov':f['valid_mask'],'prior_fov':f.get('prior_valid_mask'),'phase_labels':meta['phase_labels']}
                 if geometry:
                     context['geometry']=load_geometry(row,meta['phase_labels'])
                     geometry_source = {'encoding':recipe['architecture']['geometry_encoding'],
@@ -76,7 +79,7 @@ def predict_manifest(checkpoint,manifest,out,split_name='test',mode='tiled',tile
             start=time.perf_counter()
             predicted=predict_volume(model,f['cbct'],f['prior'],ck['normalization'],mode,tile,overlap,dev,amp,
                                      context=context,recipe=recipe)
-            output_meta={**meta,'inference':{'mode':mode,'tile':list(tile),'overlap':list(overlap),'stage':ck['stage'],
+            output_meta={**meta,**identity,'inference':{'mode':mode,'tile':list(tile),'overlap':list(overlap),'stage':ck['stage'],
                 'model_profile':ck['model_profile'],'checkpoint_sha256':checkpoint_sha,'source_sha256':row['sha256'],
                 'seconds':time.perf_counter()-start,'stage2_resolved':recipe,
                 'parameters':sum(p.numel() for p in model.parameters()),'geometry_source':geometry_source}}
@@ -92,11 +95,11 @@ def predict_manifest(checkpoint,manifest,out,split_name='test',mode='tiled',tile
                     nib.save(nib.Nifti1Image(predicted[ti],affine),str(folder/f'phase_{label:02d}_prediction.nii.gz'))
             output_meta['nifti_affine_semantics']='array ZYX to scanner ZYX; not patient LPS/RAS'
             atomic_json(folder/'metadata.json',output_meta)
-        record={'case_id':row['case_id'],'animal_id':row['animal_id'],'path':path.relative_to(out).as_posix(),
+        record={**identity,'path':path.relative_to(out).as_posix(),
             'sha256':sha256(path),'source_sha256':row['sha256'],'checkpoint_sha256':checkpoint_sha,
             'source_metadata_hash':canonical_hash(meta),'mode':mode}
         if geometry_source is not None:
             record['geometry_source'] = geometry_source
         records.append(record); atomic_jsonl(out/'manifest.jsonl',records)
-        print(json.dumps({'case_id':row['case_id'],'prediction':str(path)},ensure_ascii=False),flush=True)
+        print(json.dumps({**identity,'prediction':str(path)},ensure_ascii=False),flush=True)
     return out/'manifest.jsonl'

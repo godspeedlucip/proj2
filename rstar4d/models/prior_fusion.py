@@ -18,7 +18,7 @@ def flat_indices(points, shape):
     return (points[...,0]*shape[1] + points[...,1])*shape[2] + points[...,2]
 
 
-def match_candidates(query, key, valid, locations):
+def match_candidates(query, key, valid, locations, return_counts=False):
     shape = valid.shape[-3:]
     last = locations.new_tensor(shape) - 1
     offsets = locations.new_tensor(COARSE)
@@ -33,13 +33,14 @@ def match_candidates(query, key, valid, locations):
         indices.append(index)
     mask = torch.stack(masks,dim=1)
     raw = torch.stack(scores,dim=1)
-    present = mask.any(dim=1)
+    candidate_support = mask.sum(dim=1) if return_counts else mask.any(dim=1)
+    present = candidate_support.bool()
     masked = raw.masked_fill(~mask,-torch.inf)
     choice = masked.argmax(dim=1,keepdim=True)
     normalized = torch.where(present[:,None],masked/.2,0.).softmax(dim=1)
     winner = torch.stack(indices)[None].expand(query.shape[0],-1,-1).gather(1,choice).squeeze(1)
     return (winner, torch.where(present,raw.gather(1,choice).squeeze(1),0.),
-            torch.where(present,normalized.gather(1,choice).squeeze(1),0.),present)
+            torch.where(present,normalized.gather(1,choice).squeeze(1),0.),candidate_support)
 
 
 class GeometryPriorFusion(nn.Module):
@@ -78,14 +79,14 @@ class GeometryPriorFusion(nn.Module):
             parts = []
             for start in range(0,len(grid),self.chunk_size):
                 sl = slice(start,start+self.chunk_size)
-                inputs = (query[:,:,sl],key,source,grid[sl].long())
+                inputs = (query[:,:,sl],key,source,grid[sl].long(),observer is not None)
                 if self.training and static.is_cuda and torch.is_grad_enabled():
                     parts.append(checkpoint(match_candidates,*inputs,use_reentrant=False))
                 else:
                     parts.append(match_candidates(*inputs))
-            winner, raw, relative, present = (torch.cat(values,dim=-1) for values in zip(*parts))
+            winner, raw, relative, coarse = (torch.cat(values,dim=-1) for values in zip(*parts))
             chosen = static.flatten(2).gather(2,winner[:,None].expand(-1,16,-1)).reshape_as(static)
-            known = present.reshape(batch,1,*shape) & target[:,t:t+1]
+            known = coarse.bool().reshape(batch,1,*shape) & target[:,t:t+1]
             chosen = torch.where(known,chosen,0.)
             local = torch.cat((descriptor,chosen,(descriptor-chosen).abs()),dim=1)
             embedding = embedded[:,t,:,None,None,None].expand(-1,-1,*shape)
@@ -112,6 +113,7 @@ class GeometryPriorFusion(nn.Module):
                 count, gate_sum, square_sum = (torch.cat(parts,dim=-1) for parts in
                                                (finite_counts,gate_sums,value_squares))
                 observer(t,{'raw':raw,'relative':relative,'eligible':known.flatten(1),
+                            'coarse_count':coarse,'target_valid':target[:,t].flatten(1),
                             'fine_count':count,'gate_mean':gate_sum/count.clamp_min(1),
                             'value_rms':(square_sum/count.clamp_min(1)).sqrt(),
                             'delta_rms':correction.flatten(2).float().square().mean(dim=1).sqrt()})

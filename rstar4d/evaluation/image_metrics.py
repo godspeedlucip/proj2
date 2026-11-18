@@ -4,12 +4,24 @@ from scipy.ndimage import binary_erosion
 from skimage.metrics import structural_similarity
 
 
-def image_metrics(pred,target,valid,window=(0.,.05),roi=None,win_size=11,sigma=1.5):
+def _metrics(absolute, squared, count, ssim_sum, centers):
+    mae_reason = None if count else 'empty valid ROI'
+    ssim_reason = None if centers else (mae_reason or 'no complete SSIM window')
+    return {'mae':absolute/count if count else None,'rmse':float(np.sqrt(squared/count)) if count else None,
+            'ssim':ssim_sum/centers if centers else None,'valid_voxels':count,'ssim_centers':centers,
+            'mae_reason':mae_reason,'ssim_reason':ssim_reason,'reason':mae_reason or ssim_reason}
+
+
+def image_metrics(pred,target,valid,window=(0.,.05),roi=None,win_size=11,sigma=1.5,*,phase_labels=None):
     if pred.shape!=target.shape or valid.shape!=target.shape: raise ValueError('Metric shape mismatch')
     lo,hi=window
     if hi<=lo or win_size%2!=1: raise ValueError('Invalid metric window')
-    absolute=0.; squared=0.; count=0; ssim_sum=0.; centers=0
+    if phase_labels is not None and len(phase_labels)!=target.shape[0]:
+        raise ValueError('Metric phase labels must match the images')
+    sums = []
+    by_phase = []
     for t in range(target.shape[0]):
+        absolute=0.; squared=0.; count=0; ssim_sum=0.; centers=0
         for z in range(target.shape[1]):
             p=np.asarray(pred[t,z],dtype=np.float64); q=np.asarray(target[t,z],dtype=np.float64)
             m=np.asarray(valid[t,z],dtype=bool)
@@ -23,6 +35,11 @@ def image_metrics(pred,target,valid,window=(0.,.05),roi=None,win_size=11,sigma=1
             _,ssim_map=structural_similarity(np.clip(p,lo,hi),np.clip(q,lo,hi),data_range=hi-lo,
                 gaussian_weights=True,sigma=sigma,use_sample_covariance=False,win_size=win_size,full=True)
             ssim_sum+=float(ssim_map[eligible].sum()); centers+=int(eligible.sum())
-    return {'mae':absolute/count if count else None,'rmse':float(np.sqrt(squared/count)) if count else None,
-        'ssim':ssim_sum/centers if centers else None,'valid_voxels':count,'ssim_centers':centers,
-        'reason':None if count and centers else ('empty valid ROI' if not count else 'no complete SSIM window')}
+        totals = (absolute,squared,count,ssim_sum,centers)
+        sums.append(totals)
+        if phase_labels is not None:
+            by_phase.append({'phase_label':phase_labels[t],**_metrics(*totals)})
+    result = _metrics(*(sum(values) for values in zip(*sums)))
+    if phase_labels is not None:
+        result['by_phase'] = by_phase
+    return result

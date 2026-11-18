@@ -63,17 +63,18 @@ def contours(predictions):
                 'weights_sha256':sha256(Path(__file__)),'threshold':thresholds}
     for row in read_jsonl(predictions):
         source_path = resolve(row['path'],folder)
-        output = folder/(row['case_id']+'-contours.h5')
+        identifier = row.get('sample_id',row['case_id'])
+        output = folder/(identifier+'-contours.h5')
         with h5py.File(source_path,'r') as source, h5py.File(output,'x') as dest:
             for phase,label in enumerate((2,9)):
                 for structure in STRUCTURES:
                     key = f'{label}/{structure}'
                     dest[key] = (source['prediction'][phase]>=thresholds[structure]).astype(np.uint8)
-                    rows.append({'case_id':row['case_id'],'phase_label':label,'structure':structure,
+                    rows.append({'sample_id':identifier,'case_id':row['case_id'],'phase_label':label,'structure':structure,
                                  'prediction_sha256':row['sha256'],'dataset':key,'path':output.name,
                                  'delineation':protocol})
         for item in rows:
-            if item['case_id']==row['case_id']:
+            if item['sample_id']==identifier:
                 item['sha256'] = sha256(output)
     path = folder/'contours.jsonl'
     atomic_jsonl(path,rows)
@@ -117,6 +118,7 @@ def run(root):
     cfg = metric_defaults()
     cfg['contours']['surface_dice_tolerance_vox'] = {'heart_outer':1.,'lv':1.}
     smoke = {}
+    event_checks = {}
     for name,options in matrix(base).items():
         out = root/name
         first = train(options,manifest,split,out,2,init={'path':stage1,'source_stage':1},stop_after_epoch=1)
@@ -125,14 +127,49 @@ def run(root):
         evaluate_predictions(pred,manifest,cfg,out/'evaluation',contours=contours(pred))
         epochs = [row for row in read_jsonl(out/'train.jsonl') if row['event']=='epoch']
         smoke[name] = [row['sampling_sha256'] for row in epochs]
+        event_checks[name] = check_training_outputs(out, epochs, name)
     if any(value!=smoke['baseline'] for value in smoke.values()):
         raise AssertionError('The eight arms used different training samples')
     report = compare(root,root/'report')
-    if read_json(report)['missing_groups']:
-        raise AssertionError('A smoke arm is missing')
-    atomic_json(root/'smoke.json',{'status':'complete','arms':smoke,'shared_stage1_sha256':sha256(stage1)})
+    comparison = read_json(report)
+    if comparison['missing_groups'] or not comparison['matching_sampling_hashes']:
+        raise AssertionError('Incomplete or unpaired smoke comparison')
+    stage1_hash = sha256(stage1)
+    if any(arm['initialization']['sha256'] != stage1_hash for arm in comparison['groups'].values()):
+        raise AssertionError('The eight arms did not share the same Stage I checkpoint')
+    atomic_json(root/'smoke.json',{'status':'complete','arms':smoke,'training_outputs':event_checks,
+                                   'shared_stage1_sha256':stage1_hash})
     atomic_json(root/'stitch_error.json',stitch_error(root/'MPB/checkpoints/best.pt'))
     return report
+
+
+def check_training_outputs(run_dir, epochs, name):
+    """Read the actual event stream and full training archives produced by each arm."""
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+    history = EventAccumulator(str(run_dir/'tensorboard'), size_guidance={'images':0, 'scalars':0}).Reload()
+    expected = [row['epoch'] for row in epochs]
+    if expected != [1, 2]:
+        raise AssertionError(f'{name}: expected two consecutive completed epochs, got {expected}')
+    for tag in ('train/total','validation/case_l1','optimizer/learning_rate'):
+        if [item.step for item in history.Scalars(tag)] != expected:
+            raise AssertionError(f'{name}: invalid TensorBoard history for {tag}')
+    for tag in ('sparse','prior','prediction','reference','absolute_error','prediction_reference_contours'):
+        if [item.step for item in history.Images('validation/'+tag)] != expected:
+            raise AssertionError(f'{name}: invalid validation images for {tag}')
+    for tag, enabled in [('loss/struct', 'M' in name), ('loss/boundary', 'B' in name)]:
+        if (tag in history.Tags()['scalars']) != enabled:
+            raise AssertionError(f'{name}: unexpected supervision for {tag}')
+    for epoch in expected:
+        archive = load_checkpoint(run_dir / 'checkpoints' / f'epoch-{epoch:04d}.pt')
+        if archive['completed_epoch'] != epoch or archive['next_epoch'] != epoch+1:
+            raise AssertionError(f'{name}: incorrect training archive at epoch {epoch}')
+    evaluation = EventAccumulator(str(run_dir/'evaluation'/'tensorboard')).Reload()
+    for structure in STRUCTURES:
+        if not evaluation.Scalars(f'evaluation/{structure}/surface_dice_valid_animals'):
+            raise AssertionError(f'{name}: missing independent contour summary for {structure}')
+    return {'checkpoint_epochs':expected, 'tensorboard_epochs':expected,
+            'image_tags':history.Tags()['images'], 'evaluation_animal_counts':{
+                k:evaluation.Scalars(f'evaluation/{k}/surface_dice_valid_animals')[0].value for k in STRUCTURES}}
 
 
 if __name__=='__main__':
