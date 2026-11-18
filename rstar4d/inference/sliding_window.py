@@ -5,6 +5,7 @@ import contextlib
 import numpy as np
 import torch
 from ..models import forward_volume
+from ..data.context import plan_window
 
 
 def starts(length,tile,overlap,alignment):
@@ -22,24 +23,43 @@ def gaussian_weight(shape):
     return np.maximum(weight,1e-4).astype(np.float32)
 
 
-def predict_volume(model,cbct,prior,normalization,mode='tiled',tile=(32,128,128),overlap=(16,64,64),device='cpu',amp=True):
+def predict_volume(model,cbct,prior,normalization,mode='tiled',tile=(32,128,128),overlap=(16,64,64),
+                   device='cpu',amp=True,*,context=None,recipe=None):
     if len(cbct.shape)!=4 or prior.shape!=cbct.shape[1:]: raise ValueError('Expected matching TZYX CBCT and ZYX prior')
     model.eval(); device=torch.device(device)
     t,z,y,x=cbct.shape; scale=normalization['scale']; offset=normalization['offset']
     if mode not in ('tiled','full'): raise ValueError('mode must be tiled or full')
     stage=getattr(model,'stage',2)
-    def run(c,p):
+    contextual = recipe is not None and stage == 2 and recipe['crop_mode']=='core_with_context'
+    def run(c,p, local=None):
         inp=np.stack([(c+offset)/scale,np.broadcast_to((p+offset)/scale,c.shape)])
         tensor=torch.from_numpy(np.ascontiguousarray(inp)).unsqueeze(0).to(device)
         autocast=torch.cuda.amp.autocast() if device.type=='cuda' and amp else contextlib.nullcontext()
-        with torch.no_grad(),autocast: output=forward_volume(model,tensor)
+        with torch.no_grad(),autocast:
+            output=forward_volume(model,tensor,context=local) if local is not None else forward_volume(model,tensor)
         if not torch.isfinite(output).all(): raise FloatingPointError('Nonfinite prediction')
         return output[0,0].float().cpu().numpy()
+
+    def extract(slices, origin, pads):
+        c = np.asarray(cbct[(slice(None),*slices)],dtype=np.float32)
+        p = np.asarray(prior[slices],dtype=np.float32)
+        local = None
+        if context is not None:
+            valid = np.asarray(context['source_fov'][(slice(None),*slices)],dtype=bool)
+            prior_valid = np.asarray(context['prior_fov'][slices],dtype=bool) if context.get('prior_fov') is not None else valid.all(axis=0)
+            local = {'source_fov':torch.from_numpy(np.pad(valid,[(0,0),*pads]))[None].to(device),
+                     'prior_fov':torch.from_numpy(np.pad(prior_valid,pads))[None].to(device),
+                     'phase_labels':torch.as_tensor(context['phase_labels'],device=device)[None],
+                     'origin':torch.as_tensor(origin,device=device)[None]}
+            if 'geometry' in context:
+                local['geometry'] = torch.as_tensor(context['geometry'],device=device)[None]
+        return run(np.pad(c,[(0,0),*pads],mode='edge'),np.pad(p,pads,mode='edge'),local)
     if mode=='full':
         if stage==1:
             result=np.empty(cbct.shape,np.float32)
             for zi in range(z): result[:,zi:zi+1]=run(np.asarray(cbct[:,zi:zi+1]),np.asarray(prior[zi:zi+1]))
-        else: result=run(np.asarray(cbct,dtype=np.float32),np.asarray(prior,dtype=np.float32))
+        else:
+            result=extract(tuple(slice(0,n) for n in (z,y,x)),(0,0,0),[(0,0)]*3)
     else:
         tile=list(tile); overlap=list(overlap)
         if stage==1: tile[0]=1; overlap[0]=0
@@ -50,13 +70,15 @@ def predict_volume(model,cbct,prior,normalization,mode='tiled',tile=(32,128,128)
         for origin in product(*positions):
             slices=tuple(slice(a,min(a+k,n)) for a,k,n in zip(origin,tile,(z,y,x)))
             real=tuple(s.stop-s.start for s in slices)
-            c=np.asarray(cbct[(slice(None),)+slices],dtype=np.float32)
-            p=np.asarray(prior[slices],dtype=np.float32)
-            pads=[(0,k-n) for k,n in zip(tile,real)]
-            c=np.pad(c,[(0,0)]+pads,mode='edge'); p=np.pad(p,pads,mode='edge')
-            output=run(c,p)
             clipped=tuple(slice(0,n) for n in real); w=weight[clipped]
-            result[(slice(None),)+slices]+=output[(slice(None),)+clipped]*w
+            if contextual:
+                window=plan_window((z,y,x),origin,real,recipe['recipe'])
+                output=extract(window.slices,window.origin,[(0,0)]*3)
+                core=output[(slice(None),*window.core)]
+            else:
+                output=extract(slices,origin,[(0,k-n) for k,n in zip(tile,real)])
+                core=output[(slice(None),*clipped)]
+            result[(slice(None),)+slices]+=core*w
             denominator[slices]+=w
         if not np.all(denominator>0): raise RuntimeError('Uncovered inference voxels')
         np.divide(result,denominator[None],out=result)

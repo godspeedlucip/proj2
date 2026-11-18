@@ -42,6 +42,15 @@ def inventory_pig(data_root,out,settings_root=None,identity_map=None):
         row={'case_id':safe_id(case),'animal_id':animal,'round':round_id,'series':series,'series_relative_path':rel,
              'phase_paths':{str(k):str(phases[k]) for k in labels},'phase_labels':labels,'source_shape_zyx':shapes[0],
              'source_spacing_zyx_mm':spacings[0],'source_affine':affines[0]}
+        masks = {}
+        for path in sorted(directory.iterdir()):
+            match = re.fullmatch(r'IM(\d+)_mask.nii.gz', path.name, re.I)
+            if match and int(match.group(1)) in phases:
+                label = str(int(match.group(1)))
+                if label in masks:
+                    raise ValueError(f'Duplicate mask for {case} phase {label}')
+                masks[label] = str(path)
+        row.update(mask_paths=masks,mask_phase_labels=sorted(map(int,masks)),mask_count=len(masks))
         if settings_root:
             p=Path(settings_root)/f'round{round_id}_heart_gt_settings.csv'
             row['settings_csv']=str(p.resolve())
@@ -53,6 +62,7 @@ def inventory_pig(data_root,out,settings_root=None,identity_map=None):
     if not rows: raise ValueError('No contrast CT series discovered')
     atomic_jsonl(out/'series.jsonl',rows)
     summary={'series_count':len(rows),'animal_count':len({r['animal_id'] for r in rows if r['animal_id']}),
+        'mask_count':sum(r['mask_count'] for r in rows),'phase_count':sum(len(r['phase_labels']) for r in rows),
         'rounds':{str(i):{'series':sum(r['round']==i for r in rows),'phase_counts':sorted({len(r['phase_labels']) for r in rows if r['round']==i})} for i in sorted({r['round'] for r in rows})},'issues':issues}
     atomic_json(out/'summary.json',summary)
     atomic_json(out/'split_template.json',{'train':sorted({r['animal_id'] for r in rows if r['animal_id']}),'val':[],'test':[]})

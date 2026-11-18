@@ -25,7 +25,7 @@ def resample_pair(arrays,meta,config):
         volumes=array[None] if array.ndim==3 else array
         sampled=np.stack([affine_transform(np.asarray(v,dtype=np.float32),np.diag(step),offset=offset,
             output_shape=tuple(shape),order=0 if name=='roi_labels' else 1,mode='constant',cval=0,prefilter=False) for v in volumes])
-        if name=='valid_mask': sampled=(sampled>=1-1e-6).astype(np.uint8)
+        if name in ('valid_mask','prior_valid_mask'): sampled=(sampled>=1-1e-6).astype(np.uint8)
         if name=='roi_labels': sampled=sampled.astype(np.int32)
         result[name]=sampled[0] if array.ndim==3 else sampled
     if result.get('target') is not None: result['target'][result['valid_mask']==0]=0
@@ -68,9 +68,10 @@ def import_paired(manifest,out):
             if item.get('resample'):
                 from .contracts import metadata
                 with h5py.File(source,'r') as f:
-                    arrays={k:np.asarray(f[k]) if k in f else None for k in ['cbct','prior','target','valid_mask','roi_labels']}
+                    arrays={k:np.asarray(f[k]) if k in f else None for k in ['cbct','prior','target','valid_mask','roi_labels','prior_valid_mask']}
                     arrays,meta=resample_pair(arrays,metadata(f),item['resample'])
-                write_case(destination,arrays['cbct'],arrays['prior'],arrays['target'],arrays['valid_mask'],meta,arrays['roi_labels'])
+                write_case(destination,arrays['cbct'],arrays['prior'],arrays['target'],arrays['valid_mask'],meta,
+                           arrays['roi_labels'],arrays['prior_valid_mask'])
             else:
                 temp=destination.with_suffix('.partial'); shutil.copyfile(source,temp); os.replace(temp,destination)
         else:
@@ -98,10 +99,12 @@ def import_paired(manifest,out):
             target=read_image(item['target'],manifest.parent) if 'target' in item else None
             mask=read_image(item['valid_mask'],manifest.parent)
             roi=read_image(item['roi_labels'],manifest.parent) if item.get('roi_labels') else None
+            prior_mask=read_image(item['prior_valid_mask'],manifest.parent) if item.get('prior_valid_mask') else None
             if item.get('resample'):
-                arrays,meta=resample_pair({'cbct':a,'prior':prior,'target':target,'valid_mask':mask,'roi_labels':roi},meta,item['resample'])
-                a,prior,target,mask,roi=[arrays[k] for k in ['cbct','prior','target','valid_mask','roi_labels']]
-            write_case(destination,a,prior,target,mask,meta,roi)
+                arrays,meta=resample_pair({'cbct':a,'prior':prior,'target':target,'valid_mask':mask,
+                                           'roi_labels':roi,'prior_valid_mask':prior_mask},meta,item['resample'])
+                a,prior,target,mask,roi,prior_mask=[arrays[k] for k in ['cbct','prior','target','valid_mask','roi_labels','prior_valid_mask']]
+            write_case(destination,a,prior,target,mask,meta,roi,prior_mask)
         row={'case_id':case,'animal_id':str(item['animal_id']),'path':str(destination),'sha256':sha256(destination)}
         for key in ['round','series']: 
             if key in item: row[key]=item[key]

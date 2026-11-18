@@ -1,9 +1,20 @@
-"""Verbatim model classes from official Training_Tetris2.ipynb (cells 8-11).
+"""Stage II backbone from official Training_Tetris2.ipynb (cells 8-11).
 Authors: Ziheng Deng and Jun Zhao. See provenance.json for source SHA256.
 """
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
+
+
+def _encode(x, down, first, second):
+    x = down(x)
+    return second(first(x)) + x
+
+
+def _decode(x, skip, up, first, second):
+    x = up(x)
+    return second(first(torch.cat((x,skip),dim=1))) + x
 
 class convwithactivation(nn.Module):
     # Spatial downsampling layer
@@ -109,22 +120,32 @@ class myUNet(nn.Module):
         ##output
         self.conv8=upconvwithactivation(1*cnum,1,kernel_size=[3,3,3,3],stride=[1,1,1,1],padding=[1,1,1,1],scale_factor=[1,2,1,1],ifrelu=0)
 
-    def forward(self,x):
-        x=self.conv1(x)
-        x=self.conv1_3(self.conv1_2(x))+x
-        x1=self.conv2(x)
-        x1=self.conv2_3(self.conv2_2(x1))+x1
-        x2=self.conv3(x1)
-        x2=self.conv3_3(self.conv3_2(x2))+x2
-        x3=self.conv4(x2)
-        x3=self.conv4_3(self.conv4_2(x3))+x3
-        
-        x3=self.conv5(x3)
-        x3=self.conv5_3(self.conv5_2(torch.cat([x3,x2],dim=1)))+x3
-        x3=self.conv6(x3)
-        x3=self.conv6_3(self.conv6_2(torch.cat([x3,x1],dim=1)))+x3
-        x3=self.conv7(x3)
-        x3=self.conv7_3(self.conv7_2(torch.cat([x3,x],dim=1)))+x3
-        x3=self.conv8(x3)
-        
-        return x3
+        self.motion = None
+        self.prior_fusion = None
+        self.activation_checkpointing = False
+
+    def _backbone_step(self, function, *args):
+        if self.activation_checkpointing and self.training and torch.is_grad_enabled():
+            return checkpoint(function,*args,use_reentrant=False)
+        return function(*args)
+
+    def forward(self,x,*,context=None,return_aux=False):
+        image = x
+        x=self._backbone_step(_encode,x,self.conv1,self.conv1_2,self.conv1_3)
+        x1=self._backbone_step(_encode,x,self.conv2,self.conv2_2,self.conv2_3)
+        x2=self._backbone_step(_encode,x1,self.conv3,self.conv3_2,self.conv3_3)
+        aux = {}
+        enhanced = x2
+        if self.motion is not None:
+            delta, aux = self.motion(image[:,:1],x2,context,return_aux)
+            enhanced = enhanced + delta
+        if self.prior_fusion is not None:
+            enhanced = enhanced + self.prior_fusion(image[:,:1],image[:,1:2,0],context)
+        x2 = enhanced
+        x3=self._backbone_step(_encode,x2,self.conv4,self.conv4_2,self.conv4_3)
+        x3=self._backbone_step(_decode,x3,x2,self.conv5,self.conv5_2,self.conv5_3)
+        x3=self._backbone_step(_decode,x3,x1,self.conv6,self.conv6_2,self.conv6_3)
+        x3=self._backbone_step(_decode,x3,x,self.conv7,self.conv7_2,self.conv7_3)
+        x3=self._backbone_step(self.conv8,x3)
+
+        return (x3,aux) if return_aux else x3

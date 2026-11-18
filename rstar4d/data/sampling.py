@@ -5,6 +5,13 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from .contracts import validate_case
+from .acquisition import load_geometry
+from .context import plan_window, check_support
+from ..config import resolve_stage2, validate_train
+
+
+class InvalidCore(ValueError):
+    """The deterministic proposal may be retried with another origin."""
 
 
 class PatchDataset(Dataset):
@@ -15,12 +22,20 @@ class PatchDataset(Dataset):
         self.by_id={r['case_id']:i for i,r in enumerate(records)}
         if not records: raise ValueError('No cases in dataset')
         self.patches=[config['stage1_patch']] if stage==1 else config['stage2_patches']
+        self.resolved=resolve_stage2(config if 'extensions' in config else validate_train(config),stage)
+        self.geometry={}
+        self.use_annotations=(self.resolved['boundary']['enabled'] or self.resolved['motion']['surface_weight'] > 0)
+        self.contextual=(self.resolved['crop_mode'] == 'core_with_context'
+                         or self.resolved['motion']['mode'] != 'off' or self.resolved['prior']['mode'] != 'off'
+                         or self.use_annotations)
         for i,r in enumerate(records):
             info=validate_case(r['path'],full=False); self.shapes[i]=info['shape']; self.meta[i]=info['metadata']
             if config['temporal_roll'] and self.meta[i]['temporal_topology']!='cyclic': raise ValueError('Phase roll requires cyclic data')
             if config['small_volume']=='error' and any(any(a<b for a,b in zip(info['shape'][1:],p)) for p in self.patches):
                 raise ValueError(f'{r["case_id"]} smaller than configured patch; explicitly use small_volume=pad')
             if info['metadata']['normalization']!=config['normalization']: raise ValueError('Data/training normalization mismatch')
+            if self.resolved['prior']['mode']=='geometry':
+                self.geometry[i]=load_geometry(r,self.meta[i]['phase_labels'],allow_diagnostic_swap=False)
             self.animals[str(r['animal_id'])].append(i)
         self.animal_ids=sorted(self.animals)
 
@@ -47,6 +62,8 @@ class PatchDataset(Dataset):
                 pads=[(0,0)]+[(0,k-n) for k,n in zip(shape,mask.shape[1:])]
                 mask=np.pad(mask,pads,mode='constant')
                 if float(mask.mean())<self.config['min_valid_fraction']: continue
+                if self.contextual:
+                    return self._context_patch(i,shape,origin,r,f,rng)
                 cbct=np.asarray(f['cbct'][(slice(None),)+slices],dtype=np.float32)
                 target=np.asarray(f['target'][(slice(None),)+slices],dtype=np.float32)
                 prior=np.asarray(f['prior'][slices],dtype=np.float32)
@@ -59,7 +76,75 @@ class PatchDataset(Dataset):
             return {'input':torch.from_numpy(x.copy()),'target':torch.from_numpy(((target+offset)/scale)[None].copy()),
                     'valid':torch.from_numpy(mask[None].copy()),'case_id':r['case_id'],'animal_id':str(r['animal_id']),
                     'origin':torch.tensor(origin),'patch_shape':torch.tensor(shape)}
-        raise ValueError(f'{r["case_id"]}: no patch {list(shape)} with valid fraction >= {self.config["min_valid_fraction"]} after {self.config["max_attempts"]} attempts (draw {index}); animal/case/shape were not resampled')
+        raise InvalidCore(f'{r["case_id"]}: no patch {list(shape)} with valid fraction >= {self.config["min_valid_fraction"]} after {self.config["max_attempts"]} attempts (draw {index}); animal/case/shape were not resampled')
+
+    def _context_patch(self,i,shape,origin,record,paired,rng):
+        recipe = self.resolved['recipe']
+        policy = recipe if self.resolved['crop_mode']=='core_with_context' else {
+            'max_displacement_vox':[0]*3,'lncc_radius_vox':[0]*3,'support_margin_vox':[0]*3,'alignment':[1]*3}
+        window = plan_window(self.shapes[i][1:],origin,shape,policy)
+        if self.resolved['motion']['struct_weight'] or self.resolved['motion']['surface_weight']:
+            check_support(window,recipe,paired['valid_mask'],record['case_id'])
+        slices = window.slices
+        pads = [(0,max(0,core.stop-(stop-start))) for core,start,stop in zip(window.core,window.origin,window.stop)]
+        valid = np.asarray(paired['valid_mask'][(slice(None),*slices)],dtype=bool)
+        prior_valid = np.asarray(paired['prior_valid_mask'][slices],dtype=bool) if 'prior_valid_mask' in paired else valid.all(axis=0)
+        cbct = np.pad(np.asarray(paired['cbct'][(slice(None),*slices)],np.float32),[(0,0),*pads],mode='edge')
+        target = np.pad(np.asarray(paired['target'][(slice(None),*slices)],np.float32),[(0,0),*pads],mode='edge')
+        prior = np.pad(np.asarray(paired['prior'][slices],np.float32),pads,mode='edge')
+        valid = np.pad(valid,[(0,0),*pads],mode='constant')
+        phase_indices = np.arange(len(cbct))
+        if self.config['temporal_roll'] and self.samples is None:
+            phase_indices = np.roll(phase_indices,int(rng.integers(len(cbct))))
+        phase_labels = np.asarray(self.meta[i]['phase_labels'])[phase_indices]
+        ctx = {'phase_labels':torch.from_numpy(phase_labels), 'phase_indices':torch.from_numpy(phase_indices),
+               'source_fov':torch.from_numpy(valid[phase_indices]),
+               'prior_fov':torch.from_numpy(np.pad(prior_valid,pads,mode='constant')),
+               'origin':torch.tensor(window.origin), 'volume_shape':torch.tensor(self.shapes[i][1:]),
+               'core_bounds':torch.tensor([[axis.start,axis.stop] for axis in window.core])}
+        if i in self.geometry:
+            ctx['geometry']=torch.from_numpy(self.geometry[i][phase_indices])
+        scale,offset = (self.config['normalization'][key] for key in ('scale','offset'))
+        source = np.stack(((cbct[phase_indices]+offset)/scale,np.broadcast_to((prior+offset)/scale,cbct.shape)))
+        batch = {'input':torch.from_numpy(source),'target':torch.from_numpy(((target[phase_indices]+offset)/scale)[None]),
+                 'valid':ctx['source_fov'][None],'context':ctx,'case_id':record['case_id'],
+                 'animal_id':str(record['animal_id']),'source_path':record['path'],
+                 'origin':torch.tensor(origin),'patch_shape':torch.tensor(shape)}
+        if self.use_annotations:
+            batch.update(self._annotation_patch(record,phase_indices,slices,pads,ctx['source_fov']))
+        return batch
+
+    def _annotation_patch(self,record,phase_indices,slices,pads,valid):
+        shape = (len(phase_indices),2,*valid.shape[-3:])
+        band = np.zeros(shape,dtype=bool)
+        fields = {}
+        use_surfaces = bool(self.resolved['motion']['surface_weight'])
+        if use_surfaces:
+            fields = {key:np.zeros(shape,dtype=np.float32 if key=='distance' else bool)
+                      for key in ('surface','distance','correspondence')}
+        if record.get('annotations'):
+            import json
+            from .cardiac_annotations import STRUCTURES, VERSION
+            with h5py.File(record['annotations'],'r') as file:
+                meta = json.loads(file.attrs['metadata_json'])
+                if (meta['paired_sha256']!=record['sha256'] or meta['case_id']!=record['case_id']
+                        or str(meta['animal_id'])!=str(record['animal_id'])
+                        or meta['phase_labels']!=self.meta[self.by_id[record['case_id']]]['phase_labels']
+                        or meta['structures']!=list(STRUCTURES) or meta['version']!=VERSION
+                        or meta['distance_unit']!='output_voxel'):
+                    raise ValueError(f'{record["case_id"]}: incompatible contour annotation cache')
+                for t,i in enumerate(phase_indices):
+                    selector = (int(i),slice(None),*slices)
+                    for key in fields:
+                        fields[key][t] = np.pad(file[key][selector],[(0,0),*pads])
+                    if self.resolved['boundary']['enabled']:
+                        width = self.resolved['boundary']['half_width_vox']
+                        local = (file['domain'][selector].astype(bool) & (file['distance'][selector]<=width)
+                                 & file['annotation_available'][i,:].astype(bool)[:,None,None,None])
+                        band[t] = np.pad(local,[(0,0),*pads])
+        result = {key:torch.from_numpy(value) for key,value in fields.items()}
+        result['bands'] = torch.from_numpy(band).transpose(0,1) & valid[None]
+        return result
 
 
 def validation_samples(records,config,stage):
@@ -77,6 +162,6 @@ def validation_samples(records,config,stage):
                 try:
                     fixed=PatchDataset([r],config,stage,0,1,[spec]); fixed[0]
                     result.append(spec); break
-                except ValueError: continue
+                except InvalidCore: continue
             else: raise ValueError(f'No valid fixed validation patch for {r["case_id"]}')
     return result

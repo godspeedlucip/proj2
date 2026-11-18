@@ -68,3 +68,37 @@ def compute_loss(pred,target,valid,stage,config):
     total=l1+(weight*(1-value) if windows else 0.)
     return {'total':total,'l1':l1,'ssim':value if windows else None,'ssim_windows':windows,
             'skipped_ssim':bool(kind!='l1' and weight and not windows),'valid_count':count}
+
+
+def boundary_scale(epoch, ramp_epochs, weight):
+    return weight if ramp_epochs == 1 else weight * min(1.,max(0.,(epoch-1)/(ramp_epochs-1)))
+
+
+def boundary_terms(pred_c, target_c, bands_c, structure_weights, grad_weight_vox):
+    error = pred_c.float() - target_c.float()
+    zero = error.sum()*0
+    total = zero
+    weight_sum = 0.
+    structures = {}
+    for index, name in enumerate(('heart_outer','lv')):
+        band = bands_c[:,index:index+1].bool()
+        count = int(band.sum())
+        grey = error[band].abs().mean() if count else zero
+        pair_count = 0
+        gradient_sum = zero
+        if grad_weight_vox:
+            for axis in (-3,-2,-1):
+                left = band.narrow(axis,0,band.shape[axis]-1)
+                right = band.narrow(axis,1,band.shape[axis]-1)
+                paired = left & right
+                pair_count += int(paired.sum())
+                gradient_sum = gradient_sum + error.diff(dim=axis)[paired].abs().sum()
+        gradient = gradient_sum / pair_count if pair_count else zero
+        if count:
+            weight = structure_weights[name]
+            weight_sum += weight
+            total = total + weight*(grey + grad_weight_vox*gradient)
+        structures[name] = {'voxels':count,'pairs':pair_count,'l1':grey,'gradient':gradient,
+                            'phase_voxels':band.sum(dim=(1,3,4,5)).detach()}
+    overlap = int((bands_c[:,0] & bands_c[:,1]).sum())
+    return {'total':total/weight_sum if weight_sum else zero,'structures':structures,'overlap':overlap}

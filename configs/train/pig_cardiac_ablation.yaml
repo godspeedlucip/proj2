@@ -1,0 +1,37 @@
+device: cuda
+amp: true
+model_profile: official_v1
+epochs: {'1': 60, '2': 30}
+learning_rate: 0.00015
+milestones: {'1': [20, 30, 40], '2': [10, 20, 25]}
+scheduler: multistep
+gamma: 0.5
+loss: {kind: public_code, ssim_weight: 0.1}
+normalization: {scale: 0.02, offset: 0.0}
+stage1_patch: [1, 256, 256]
+stage2_patches: [[16, 128, 128], [32, 96, 96], [64, 64, 64]]
+stage2_crop_mode: core_with_context
+stage2_context:
+  lncc_radius_vox: [2, 2, 2]
+  # x2 backbone radius [29,32,32] plus one interpolation cell [2,4,4].
+  support_margin_vox: [31, 36, 36]
+  edge_threshold: 0.0001
+  variance_threshold: 0.00000001
+  match_chunk_size: 32768
+extensions:
+  motion:
+    mode: "off"
+    max_displacement_vox: [8, 8, 8]
+    struct_weight: 0.05
+    smooth_weight: 0.01
+    surface_weight: 0.0
+    surface_truncation_vox: 5.0
+  prior:
+    mode: "off"
+  boundary:
+    enabled: false
+    half_width_vox: 2.0
+    structure_weights: {heart_outer: 1.0, lv: 1.0}
+    ramp_epochs: 5
+    weight: 0.5
+    grad_weight_vox: 0.0

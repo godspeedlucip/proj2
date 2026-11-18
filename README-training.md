@@ -1,5 +1,16 @@
 # RSTAR4D 完整训练工程
 
+## 猪心轮廓消融（`rstar-advance`）
+
+- 用 `inventory-pig` 生成 `series.jsonl`，按真实相位核对 mask。标注声明为 JSONL，每行用 `case_id`、`animal_id`、`phase_label` 和 `structure` 定位结构。结构取 `heart_outer` 或 `lv`。每行显式填写 `available`。确认可用后提供 `trusted_domain` 作为二值 NIfTI，或填写 `whole_fov_confirmed: true`。可选字段 `mask` 覆盖同系列默认 mask，`correspondence_domain` 指定可靠的双端对应区域，`closed` 允许对闭合轮廓报告体积。
+- 用 `python -m rstar4d prepare-cardiac-annotations --inventory INVENTORY --manifest PAIRED_MANIFEST --annotations DECLARATIONS --split SPLIT --out PREPARED` 构建带 SHA256 的边界缓存和覆盖表。导入的旧 NIfTI 若缺 TIGRE 源网格信息，在声明中提供从输出 ZYX 索引到 NIfTI 世界坐标的 `output_to_world` 矩阵。已经对齐的 `roi_labels` 可直接使用。
+- 用 `python -m experiments.cardiac_ablation write-matrix --base configs/train/pig_cardiac_ablation_16gb.yaml --out CONFIG_DIR` 派生八组，`write-controls` 派生机制对照。用同一 Stage I checkpoint 分别运行 `train --stage 2 --init-from-stage1`。CUDA 试配用 `benchmark --stage 2 --manifest MANIFEST --config CONFIG --memory-limit-gib 13.5`，观察实际 C/W 和监督覆盖。原设计尺寸保存在 `configs/train/pig_cardiac_ablation.yaml`。
+- `infer` 按 checkpoint 恢复 M/P 模式和滑窗上下文。对每组重建用同一冻结分割器或盲法勾画。评价清单每行提供 `case_id`、`phase_label`、`structure`、`prediction_sha256`、独立二值 ZYX HDF5 的 `path`、`sha256`、`dataset` 和 `delineation`。冻结分割器的 `delineation` 含 `method: frozen_segmenter`、`version`、`weights_sha256`、`threshold`，盲法用 `method: blinded` 与 `batch`。
+- 在指标 YAML 的 `contours.surface_dice_tolerance_vox` 中为两个结构填写锁定容差，用 `evaluate --contours CONTOURS --metric-config METRICS` 输出轮廓指标。最后用 `python -m experiments.cardiac_ablation compare --runs RUNS --out REPORT` 按动物报告配对差值。
+- `angle-layouts` 从同一混合扫描按两个等量角度子集重建一个状态，并分别导出实际几何和交换几何诊断清单。`diagnose-prior` 接收验证病例对照清单，每行含 `case_id`、`animal_id`、`path`、`sha256`，指向同一网格的 NPZ，含已归一化的 `dynamic[T,Z,Y,X]`、`matched[Z,Y,X]`、`mismatched[Z,Y,X]`、`source_fov[T,Z,Y,X]`、`prior_fov[Z,Y,X]` 及几何模式的 `geometry[T,14]`。
+
+[设计规格](docs/superpowers/specs/2026-11-18-rstar4d-cardiac-contour-ablation-design.md) · [实施计划](docs/superpowers/plans/2026-11-18-rstar4d-cardiac-contour-ablation.md)
+
 本工程以公开Notebook为算法依据：原网络/state_dict、circular时间填充、Stage I跳过z、Stage II原Dirac/零初始化、L1＋0.1×(1−SSIM)、Adam 1.5e-4、60/30轮及原分段学习率。原Notebook和权重保留在 `RSTAR/githubcode/`。
 
 猪数据使用TIGRE；HU→mu、几何偏移、FDK、padding、FOV和有效掩膜沿用用户生成代码，副本及SHA256记录在 `rstar4d/provenance.json`。运行时不依赖工作区外的Python脚本。猪域强度固定除以0.02、16GB配置缩小空间块，均为明确适配。当前默认prior按公开MATLAB的相位视角数加权FDK；`prior_mode: all_views_fdk`可选，对应用户原prior生成方式。两种prior均只使用动态混合投影。

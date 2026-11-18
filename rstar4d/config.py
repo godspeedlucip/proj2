@@ -1,5 +1,6 @@
 from __future__ import annotations
 import copy
+import math
 from pathlib import Path
 import yaml
 from .utils.io import resolve
@@ -15,7 +16,17 @@ def train_defaults():
         'stage1_patch':[1,256,256],'stage2_patches':[[16,128,128],[32,96,96],[64,64,64]],
         'steps_per_epoch':{'1':0,'2':0},'validation_samples_per_case':1,
         'small_volume':'error','min_valid_fraction':.5,'max_attempts':32,
-        'accumulation':1,'clip_grad':None,'temporal_roll':False,'init_weights':None}
+        'accumulation':1,'clip_grad':None,'temporal_roll':False,'init_weights':None,
+        'stage2_crop_mode':'legacy',
+        'stage2_context':{'lncc_radius_vox':[2,2,2], 'support_margin_vox':[31,36,36],
+                          'edge_threshold':1e-4, 'variance_threshold':1e-8, 'match_chunk_size':32768,
+                          'activation_checkpointing':True},
+        'extensions':{
+            'motion':{'mode':'off','max_displacement_vox':[8,8,8],'struct_weight':.05,
+                      'smooth_weight':.01,'surface_weight':0.,'surface_truncation_vox':5.},
+            'prior':{'mode':'off'},
+            'boundary':{'enabled':False,'half_width_vox':2.,'structure_weights':{'heart_outer':1.,'lv':1.},
+                        'ramp_epochs':5,'weight':.5,'grad_weight_vox':0.}}}
 
 
 def simulation_defaults():
@@ -26,7 +37,8 @@ def simulation_defaults():
 
 
 def metric_defaults():
-    return {'window':[0.,.05],'ssim_window':11,'sigma':1.5,'roi_labels':{},'projection':False}
+    return {'window':[0.,.05],'ssim_window':11,'sigma':1.5,'roi_labels':{},'projection':False,
+            'contours':{'surface_dice_tolerance_vox':{'heart_outer':None,'lv':None},'half_width_vox':2.}}
 
 
 def merge_strict(defaults,values,path=''):
@@ -60,7 +72,71 @@ def validate_train(cfg):
     for patch in [cfg['stage1_patch']]+cfg['stage2_patches']:
         if len(patch)!=3 or any(not isinstance(v,int) or v<1 for v in patch): raise ValueError('Invalid patch shape')
     if not cfg['stage2_patches']: raise ValueError('No Stage II patches')
+    _validate_stage2(cfg)
     return cfg
+
+
+def _number(value, name, *, positive=False):
+    if type(value) not in (int, float) or not math.isfinite(value) or value < 0 or (positive and value == 0):
+        raise ValueError(f'Invalid {name}: {value}')
+
+
+def _validate_stage2(config):
+    motion, prior, boundary = (config['extensions'][key] for key in ('motion','prior','boundary'))
+    recipe = config['stage2_context']
+    if config['stage2_crop_mode'] not in ('legacy','core_with_context'):
+        raise ValueError('Invalid stage2_crop_mode')
+    if type(recipe['activation_checkpointing']) is not bool:
+        raise ValueError('activation_checkpointing must be boolean')
+    if motion['mode'] not in ('off','identity','learned') or prior['mode'] not in ('off','image_only','geometry'):
+        raise ValueError('Invalid motion or prior mode (quote "off" in YAML)')
+    for key in ('struct_weight','smooth_weight','surface_weight','surface_truncation_vox'):
+        _number(motion[key], key, positive=key == 'surface_truncation_vox')
+    if motion['surface_weight'] and motion['mode'] != 'learned':
+        raise ValueError('Surface loss requires learned motion')
+    if type(boundary['enabled']) is not bool:
+        raise ValueError('boundary.enabled must be boolean')
+    for key in ('weight','grad_weight_vox','half_width_vox'):
+        _number(boundary[key], key, positive=key == 'half_width_vox')
+    for key, value in boundary['structure_weights'].items():
+        _number(value, key, positive=True)
+    if boundary['enabled'] and boundary['weight'] == 0:
+        raise ValueError('Enabled boundary loss requires a positive weight')
+    for name, values in [('max_displacement_vox', motion['max_displacement_vox']),
+                         ('lncc_radius_vox', recipe['lncc_radius_vox']),
+                         ('support_margin_vox', recipe['support_margin_vox'])]:
+        if not isinstance(values, (tuple,list)) or len(values) != 3:
+            raise ValueError(f'{name} must contain three ZYX values')
+        for value in values:
+            _number(value, name, positive=name != 'support_margin_vox')
+            if name != 'max_displacement_vox' and type(value) is not int:
+                raise ValueError(f'{name} requires integer voxel counts')
+    for name, value in [('ramp_epochs', boundary['ramp_epochs']), ('match_chunk_size', recipe['match_chunk_size'])]:
+        if type(value) is not int or value < 1:
+            raise ValueError(f'{name} must be a positive integer')
+    for name in ('edge_threshold','variance_threshold'):
+        _number(recipe[name], name, positive=True)
+
+
+def resolve_stage2(config: dict, stage: int) -> dict:
+    """Expose effective weights without modifying the preset shared by the factorial runs."""
+    motion, prior, boundary = (copy.deepcopy(config['extensions'][key]) for key in ('motion','prior','boundary'))
+    if stage == 1:
+        motion['mode'] = prior['mode'] = 'off'
+        boundary['enabled'] = False
+    if motion['mode'] != 'learned':
+        for name in ('struct_weight','smooth_weight','surface_weight'):
+            motion[name] = 0.
+    if not boundary['enabled']:
+        boundary['weight'] = boundary['grad_weight_vox'] = 0.
+    recipe = {**copy.deepcopy(config['stage2_context']), 'max_displacement_vox': motion['max_displacement_vox'],
+              'alignment': [2,8,8], 'feature_stride': [2,4,4], 'core_shapes': copy.deepcopy(config['stage2_patches'])}
+    return {'crop_mode': config['stage2_crop_mode'] if stage == 2 else 'legacy',
+            'motion': motion, 'prior': prior, 'boundary': boundary, 'recipe': recipe,
+            'version': 'cardiac_v1', 'distance_unit': 'output_voxel',
+            'motion_seed': config['seed'] + 31013, 'prior_seed': config['seed'] + 67003,
+            'architecture': {'feature_channels':64,'descriptor_channels':16,'search_window':3,
+                             'prior_temperature':.2,'geometry_encoding':'angles_v1'}}
 
 
 def load_config(path=None,kind='train'):

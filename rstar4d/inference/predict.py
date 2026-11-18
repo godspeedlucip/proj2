@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import os
+import time
 from pathlib import Path
 import h5py
 import numpy as np
@@ -9,9 +10,10 @@ import tifffile
 from PIL import Image, ImageDraw
 from ..training.checkpoint import load_checkpoint
 from ..training.trainer import select_device
-from ..models import create_model
+from ..models import model_from_checkpoint
 from ..data.contracts import validate_manifest, validate_split
-from ..utils.io import atomic_json, atomic_jsonl, sha256, canonical_hash
+from ..data.acquisition import load_geometry
+from ..utils.io import atomic_json, atomic_jsonl, sha256, canonical_hash, read_json
 from .sliding_window import predict_volume
 
 
@@ -27,11 +29,21 @@ def preview(path,cbct,prediction,target,window=(0.,.05)):
     canvas.save(path)
 
 
-def predict_manifest(checkpoint,manifest,out,split_name='test',mode='tiled',tile=(32,128,128),overlap=(16,64,64),device='cuda',amp=True,export=('h5',),split=None):
+def predict_manifest(checkpoint,manifest,out,split_name='test',mode='tiled',tile=None,overlap=None,device='cuda',amp=True,export=('h5',),split=None):
     ck=load_checkpoint(checkpoint,require_training=False); dev=select_device(device)
     if not all(k in ck for k in ['stage','model_profile','normalization','intensity_domain']): raise ValueError('Checkpoint lacks inference contracts')
-    model=create_model(ck['stage'],ck['model_profile']).to(dev); model.load_state_dict(ck['state_dict'],strict=True)
-    rows=validate_manifest(manifest,require_target=False)
+    model=model_from_checkpoint(ck).to(dev)
+    recipe=ck.get('stage2_resolved')
+    contextual=recipe and recipe['crop_mode']=='core_with_context'
+    geometry=recipe and recipe['prior']['mode']=='geometry'
+    use_context=contextual or model.stage==2 and (model.motion is not None or model.prior_fusion is not None)
+    if tile is None:
+        tile=recipe['recipe']['core_shapes'][0] if contextual else (32,128,128)
+    if overlap is None:
+        overlap=tuple((k//(2*a))*a for k,a in zip(tile,(2,8,8))) if contextual else (16,64,64)
+    rows=validate_manifest(manifest,require_target=False,full=False,
+                           sidecars=('projections','angle_summary') if geometry else (),
+                           prefer_angle_summary=True)
     if split_name!='all':
         selected_split=validate_split(rows,split or ck.get('split',{}))
         rows=[r for r in rows if str(r['animal_id']) in selected_split[split_name]]
@@ -47,9 +59,27 @@ def predict_manifest(checkpoint,manifest,out,split_name='test',mode='tiled',tile
         folder=out/row['case_id']; folder.mkdir()
         path=folder/'prediction.h5'; temp=folder/'prediction.partial'
         with h5py.File(row['path'],'r') as f:
-            predicted=predict_volume(model,f['cbct'],f['prior'],ck['normalization'],mode,tile,overlap,dev,amp)
+            context = None
+            geometry_source = None
+            if use_context:
+                context={'source_fov':f['valid_mask'],'prior_fov':f.get('prior_valid_mask'),'phase_labels':meta['phase_labels']}
+                if geometry:
+                    context['geometry']=load_geometry(row,meta['phase_labels'])
+                    geometry_source = {'encoding':recipe['architecture']['geometry_encoding'],
+                                       'projections_sha256':row['projections_sha256']}
+                    if row.get('angle_summary'):
+                        summary = read_json(row['angle_summary'])
+                        geometry_source.update(angle_summary_sha256=row['angle_summary_sha256'],
+                                               diagnostic_swap=bool(summary.get('diagnostic_swap',False)),
+                                               encoded_indices=summary.get('encoded_indices'),
+                                               actual_indices=summary.get('actual_indices'))
+            start=time.perf_counter()
+            predicted=predict_volume(model,f['cbct'],f['prior'],ck['normalization'],mode,tile,overlap,dev,amp,
+                                     context=context,recipe=recipe)
             output_meta={**meta,'inference':{'mode':mode,'tile':list(tile),'overlap':list(overlap),'stage':ck['stage'],
-                'model_profile':ck['model_profile'],'checkpoint_sha256':checkpoint_sha,'source_sha256':row['sha256']}}
+                'model_profile':ck['model_profile'],'checkpoint_sha256':checkpoint_sha,'source_sha256':row['sha256'],
+                'seconds':time.perf_counter()-start,'stage2_resolved':recipe,
+                'parameters':sum(p.numel() for p in model.parameters()),'geometry_source':geometry_source}}
             with h5py.File(temp,'w') as dest:
                 dest.create_dataset('prediction',data=predicted,chunks=(1,min(predicted.shape[1],16),min(predicted.shape[2],128),min(predicted.shape[3],128)),compression='gzip',compression_opts=1)
                 dest.attrs['metadata_json']=json.dumps(output_meta,ensure_ascii=False)
@@ -65,6 +95,8 @@ def predict_manifest(checkpoint,manifest,out,split_name='test',mode='tiled',tile
         record={'case_id':row['case_id'],'animal_id':row['animal_id'],'path':path.relative_to(out).as_posix(),
             'sha256':sha256(path),'source_sha256':row['sha256'],'checkpoint_sha256':checkpoint_sha,
             'source_metadata_hash':canonical_hash(meta),'mode':mode}
+        if geometry_source is not None:
+            record['geometry_source'] = geometry_source
         records.append(record); atomic_jsonl(out/'manifest.jsonl',records)
         print(json.dumps({'case_id':row['case_id'],'prediction':str(path)},ensure_ascii=False),flush=True)
     return out/'manifest.jsonl'

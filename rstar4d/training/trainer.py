@@ -3,6 +3,7 @@ from collections import defaultdict, Counter
 import contextlib
 import copy
 import csv
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -11,13 +12,15 @@ import traceback
 import uuid
 import torch
 from torch.utils.data import DataLoader
-from ..config import validate_train
-from ..models import create_model, forward_volume, initialize_stage2
+from ..config import validate_train, resolve_stage2
+from ..models import create_model, forward_volume, initialize_stage2, attach_stage2_extensions
 from ..data.contracts import validate_manifest, validate_split, snapshot
+from ..data.context import crop_core
 from ..data.sampling import PatchDataset, validation_samples
 from ..utils.io import atomic_json, append_jsonl, read_json, canonical_hash, sha256, code_fingerprint, environment
 from ..utils.seed import seed_all, rng_state, restore_rng
-from .losses import compute_loss
+from .losses import compute_loss, boundary_terms, boundary_scale
+from .motion_losses import motion_terms
 from .checkpoint import atomic_save, load_checkpoint
 
 
@@ -44,6 +47,62 @@ def _loader(dataset,config,epoch,stage):
         pin_memory=config['pin_memory'],generator=generator,persistent_workers=False)
 
 
+def batch_context(batch, device):
+    if 'context' in batch:
+        return {name:value.to(device) for name,value in batch['context'].items()}
+    return None
+
+
+def compute_batch(model, batch, device, stage, resolved, loss_config, epoch, amp):
+    x,target,valid = (batch[name].to(device) for name in ('input','target','valid'))
+    context = batch_context(batch,device)
+    settings = resolved['motion']
+    use_motion = any(settings[key] for key in ('struct_weight','smooth_weight','surface_weight'))
+    with _amp(device,amp):
+        if use_motion:
+            pred,aux = forward_volume(model,x,context=context,return_aux=True)
+        elif context is not None:
+            pred = forward_volume(model,x,context=context)
+        else:
+            pred = forward_volume(model,x)
+    if context is not None:
+        core_pred,core_target,core_valid = (crop_core(value,context) for value in (pred,target,valid))
+    else:
+        core_pred,core_target,core_valid = pred,target,valid
+    loss = compute_loss(core_pred,core_target,core_valid,stage,loss_config)
+    diagnostics = {}
+    if use_motion:
+        supervision = {'target':target,'source_path':batch['source_path']}
+        if settings['surface_weight']:
+            supervision.update({key:batch[key].to(device) for key in ('surface','distance','correspondence')})
+        terms = motion_terms(aux,supervision,context,settings,resolved['recipe'])
+        for key in ('struct','smooth','surface'):
+            raw = terms.pop(key)
+            weighted = settings[key+'_weight']*raw
+            loss['total'] = loss['total'] + weighted
+            diagnostics[key] = float(raw.detach())
+            diagnostics[key+'_weighted'] = float(weighted.detach())
+        diagnostics.update(terms)
+    if resolved['boundary']['enabled']:
+        cfg = resolved['boundary']
+        bands = crop_core(batch['bands'].to(device),context)
+        boundary = boundary_terms(core_pred,core_target,bands,cfg['structure_weights'],cfg['grad_weight_vox'])
+        weight = boundary_scale(epoch,cfg['ramp_epochs'],cfg['weight'])
+        loss['total'] = loss['total'] + weight*boundary['total']
+        diagnostics.update(boundary_weight=weight,boundary=float(boundary['total'].detach()),
+                           boundary_weighted=float(boundary['total'].detach())*weight,
+                           boundary_overlap=boundary['overlap'])
+        diagnostics['structures'] = {}
+        for key,value in boundary['structures'].items():
+            diagnostics['structures'][key] = {
+                **{field:float(n.detach()) if torch.is_tensor(n) else n for field,n in value.items()
+                   if field!='phase_voxels'},
+                'phase_voxels':dict(zip(context['phase_labels'][0].tolist(),value['phase_voxels'][0].tolist())),
+            }
+        diagnostics['boundary_dual_hit'] = int(all(item['voxels']>0 for item in diagnostics['structures'].values()))
+    return loss, diagnostics
+
+
 def validate_model(model,records,config,stage,samples,device):
     data=PatchDataset(records,config,stage,0,len(samples),samples)
     cases=defaultdict(lambda:{'sum':0.,'count':0,'animal_id':None})
@@ -51,7 +110,11 @@ def validate_model(model,records,config,stage,samples,device):
     with torch.no_grad():
         for batch in _loader(data,config,0,stage):
             x=batch['input'].to(device); target=batch['target'].to(device); valid=batch['valid'].to(device)
-            with _amp(device,config['amp']): pred=forward_volume(model,x)
+            context = batch_context(batch,device)
+            with _amp(device,config['amp']):
+                pred=forward_volume(model,x,context=context) if context is not None else forward_volume(model,x)
+            if context is not None:
+                pred,target,valid = (crop_core(value,context) for value in (pred,target,valid))
             if not torch.isfinite(pred).all(): raise FloatingPointError(f'Nonfinite validation output: {batch["case_id"]}')
             item=cases[batch['case_id'][0]]
             item['sum']+=float((pred.float()-target).abs()[valid].sum())
@@ -78,6 +141,7 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
     """Train one stage; resume is guaranteed at completed epoch boundaries only."""
     config=validate_train(config); run_dir=Path(run_dir).resolve()
     if stage not in (1,2): raise ValueError('stage must be 1 or 2')
+    resolved = resolve_stage2(config,stage)
     if resume and init: raise ValueError('resume and init are mutually exclusive')
     saved=load_checkpoint(resume) if resume else None
     if saved and saved['stage']!=stage: raise ValueError('Checkpoint stage mismatch')
@@ -97,7 +161,12 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
         run_id=saved['run_id']
     else: run_id=str(uuid.uuid4())
     if not resume and run_dir.exists() and any(run_dir.iterdir()): raise FileExistsError('Training directory is nonempty; use resume or a new run')
-    rows=validate_manifest(manifest,split,require_target=True)
+    sidecars = []
+    if resolved['prior']['mode']=='geometry':
+        sidecars.extend(('projections','angle_summary'))
+    if resolved['boundary']['enabled'] or resolved['motion']['surface_weight']:
+        sidecars.append('annotations')
+    rows=validate_manifest(manifest,split,require_target=True,sidecars=sidecars,prefer_angle_summary=True)
     split=validate_split(rows,split)
     training=[r for r in rows if str(r['animal_id']) in split['train']]
     validation=[r for r in rows if str(r['animal_id']) in split['val']]
@@ -105,9 +174,13 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
     data=snapshot(rows,split); sig=signature(config,data)
     if saved and saved['signature']!=sig: raise ValueError('Resume rejected: data, split, algorithm/config or implementation changed; use an explicit warm start')
     device=select_device(config['device']); seed_all(config['seed'],config['deterministic'],config['threads'])
-    model=create_model(stage,config['model_profile']).to(device)
+    model=create_model(stage,config['model_profile'])
     initialization={'kind':'random','source_stage':None,'sha256':None}
     if saved:
+        if saved.get('stage2_resolved') is not None and saved['stage2_resolved']!=resolved:
+            raise ValueError('Checkpoint Stage II recipe does not match the run')
+        if stage==2:
+            attach_stage2_extensions(model,resolved)
         model.load_state_dict(saved['state_dict'],strict=True); initialization=saved['initialization']
     else:
         if init is None and stage==1 and config['init_weights']: init={'path':config['init_weights'],'source_stage':1}
@@ -117,11 +190,19 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
             source_stage=int(init['source_stage'])
             if 'stage' in value and value['stage']!=source_stage: raise ValueError('Initialization stage metadata mismatch')
             if stage==1 and source_stage!=1: raise ValueError('Stage I requires Stage I initialization')
-            if stage==2 and source_stage==1: initialize_stage2(model,state)
-            else: model.load_state_dict(state,strict=True)
+            if stage==2 and source_stage==1:
+                initialize_stage2(model,state)
+                attach_stage2_extensions(model,resolved)
+            elif stage==2:
+                load_report = warm_start_stage2(model,state,value.get('stage2_resolved'),resolved)
+            else:
+                model.load_state_dict(state,strict=True)
             initialization={'kind':'stage_transfer' if stage==2 and source_stage==1 else 'warm_start',
                 'source_stage':source_stage,'sha256':sha256(init['path']),'path':str(Path(init['path']).resolve())}
+            if stage==2 and source_stage==2:
+                initialization['parameters'] = load_report
         elif stage==2: raise ValueError('Stage II needs init-from-stage1, init-from-stage2, or resume')
+    model.to(device)
     optimizer=torch.optim.Adam([p for p in model.parameters() if p.requires_grad],lr=config['learning_rate'],
         betas=tuple(config['betas']),weight_decay=config['weight_decay'])
     total_epochs=config['epochs'][str(stage)]
@@ -140,6 +221,9 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
     samples=(saved['validation_samples'] if saved else validation_samples(validation,config,stage))
     # Validation sample identity is part of the checkpoint, including patch shapes/origins.
     atomic_json(run_dir/'resolved_config.json',config); atomic_json(run_dir/'data_snapshot.json',data)
+    atomic_json(run_dir/'initialization.json',initialization)
+    if stage==2:
+        atomic_json(run_dir/'stage2_resolved.json',resolved)
     atomic_json(run_dir/'split.json',split); atomic_json(run_dir/'validation_samples.json',samples)
     atomic_json(run_dir/'environment.json',environment())
     if start_epoch>total_epochs:
@@ -155,12 +239,31 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
             dataset=PatchDataset(training,config,stage,epoch,length)
             loader=_loader(dataset,config,epoch,stage)
             total_loss=0.; total_l1=0.; skipped=0; valid_ratios=[]; amp_overflows=0; epoch_updates=0; shape_counts=Counter(); animal_counts=Counter()
+            cardiac_counts=Counter(); draws=hashlib.sha256()
             optimizer.zero_grad(set_to_none=True)
             for index,batch in enumerate(loader):
-                x=batch['input'].to(device); target=batch['target'].to(device); valid=batch['valid'].to(device)
+                x=batch['input']; valid=batch['valid']
+                context = batch.get('context')
                 shape_counts['x'.join(map(str,x.shape[2:]))]+=1; animal_counts[batch['animal_id'][0]]+=1
-                with _amp(device,config['amp']): pred=forward_volume(model,x)
-                loss=compute_loss(pred,target,valid,stage,loss_config)
+                loss, diagnostics = compute_batch(model,batch,device,stage,resolved,loss_config,epoch,config['amp'])
+                window = {}
+                if context is not None:
+                    window = {'case_id':batch['case_id'][0],'core_origin':batch['origin'][0].tolist(),
+                              'core_shape':batch['patch_shape'][0].tolist(),'window_origin':context['origin'][0].tolist(),
+                              'window_shape':list(x.shape[-3:]),'phase_labels':context['phase_labels'][0].tolist(),
+                              'left_context_vox':context['core_bounds'][0,:,0].tolist(),
+                              'right_context_vox':(torch.tensor(x.shape[-3:])-context['core_bounds'][0,:,1]).tolist()}
+                    draws.update(json.dumps(window,sort_keys=True).encode())
+                    for field,number in diagnostics.items():
+                        if field!='structures': cardiac_counts[field] += number
+                    for structure,values in diagnostics.get('structures',{}).items():
+                        cardiac_counts[structure+'_voxels'] += values['voxels']
+                        cardiac_counts[structure+'_pairs'] += values['pairs']
+                        cardiac_counts[structure+'_hit_cores'] += int(values['voxels']>0)
+                        cardiac_counts[structure+'_l1'] += values['l1']
+                        cardiac_counts[structure+'_gradient'] += values['gradient']
+                    append_jsonl(run_dir/'cardiac_samples.jsonl',{'epoch':epoch,'draw':index,'animal_id':batch['animal_id'][0],
+                                                                  **window,**diagnostics})
                 if not torch.isfinite(loss['total']): raise FloatingPointError(f'Nonfinite loss at {batch["case_id"]}, epoch={epoch}, draw={index}')
                 # Average over the actual size of each accumulation group, including the final short group.
                 group_start=(index//config['accumulation'])*config['accumulation']
@@ -182,7 +285,7 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
                         append_jsonl(run_dir/'train.jsonl',{'event':'amp_overflow','epoch':epoch,'draw':index,
                             'case_id':batch['case_id'][0],'scale_before':previous_scale,'scale_after':scaler.get_scale()})
                 total_loss+=float(loss['total'].detach()); total_l1+=float(loss['l1'].detach()); skipped+=int(loss['skipped_ssim'])
-                valid_ratios.append(float(valid.float().mean()))
+                valid_ratios.append(float(crop_core(valid,context).float().mean() if context is not None else valid.float().mean()))
                 if (index+1)%config['log_every']==0 or index+1==length:
                     append_jsonl(run_dir/'train.jsonl',{'event':'batch','epoch':epoch,'stage':stage,'draw':index,'step':step,
                         'case_id':batch['case_id'][0],'shape':list(x.shape),'l1':float(loss['l1'].detach()),
@@ -201,6 +304,9 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
                 'skipped_ssim':skipped,'amp_overflows':amp_overflows,'optimizer_updates':epoch_updates,
                 'sample_count':length,'shape_counts_tzyx':dict(shape_counts),'animal_draw_counts':dict(animal_counts),
                 'valid_fraction':sum(valid_ratios)/len(valid_ratios),'validation_cases':evaluation['cases']}
+            if getattr(dataset,'contextual',False):
+                entry.update(cardiac=dict(cardiac_counts), sampling_sha256=draws.hexdigest(),
+                             trainable_parameters=sum(p.numel() for p in model.parameters() if p.requires_grad))
             payload={'schema_version':1,'checkpoint_kind':'training','run_id':run_id,'state_dict':model.state_dict(),'stage':stage,
                 'model_profile':config['model_profile'],'completed_epoch':epoch,'next_epoch':epoch+1,'step':step,
                 'stage_complete':epoch==total_epochs,'optimizer':optimizer.state_dict(),'scheduler':scheduler.state_dict(),
@@ -209,6 +315,8 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
                 'manifest':str(Path(manifest).resolve()),'split':split,'environment':environment(),
                 'code_fingerprint':code_fingerprint(),'normalization':config['normalization'],
                 'intensity_domain':rows[0]['metadata']['intensity_domain'],'calibration_application':rows[0]['metadata']['calibration_application']}
+            if stage==2:
+                payload['stage2_resolved']=resolved
             if improved: atomic_save(ckdir/'best.pt',payload)
             atomic_save(ckdir/'last.pt',payload)
             append_jsonl(run_dir/'train.jsonl',entry); _write_metrics_csv(run_dir/'metrics.csv',entry)
@@ -218,3 +326,18 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
         atomic_json(run_dir/'error.json',{'error':str(exc),'traceback':traceback.format_exc(),'stage':stage})
         raise
     return {'stage':stage,'complete':final_epoch==total_epochs,'checkpoint':str(ckdir/'best.pt'),'last':str(ckdir/'last.pt'),'epochs':final_epoch}
+
+
+def warm_start_stage2(model,state,source_recipe,target_recipe):
+    backbone = {name:value for name,value in state.items() if not name.startswith(('motion.','prior_fusion.'))}
+    model.load_state_dict(backbone,strict=True)
+    attach_stage2_extensions(model,target_recipe)
+    full = model.state_dict()
+    compatible = source_recipe and source_recipe['version']==target_recipe['version']
+    loaded = dict(backbone)
+    if compatible:
+        for name,value in state.items():
+            if name in full and value.shape==full[name].shape and name not in backbone:
+                loaded[name]=value
+    model.load_state_dict({**full,**loaded},strict=True)
+    return {'loaded':sorted(loaded),'new':sorted(set(full)-set(loaded)),'skipped':sorted(set(state)-set(loaded))}

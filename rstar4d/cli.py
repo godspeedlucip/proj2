@@ -20,6 +20,10 @@ def parser():
     d=sub.add_parser('make-phantom'); d.add_argument('--out',required=True); d.add_argument('--views',type=int,default=240); d.add_argument('--phase-counts',nargs=3,type=int,default=[10,11,10]); d.add_argument('--shape',nargs=3,type=int,default=[16,32,32])
     d=sub.add_parser('simulate-pig'); d.add_argument('--config',required=True); d.add_argument('--manifest',required=True); d.add_argument('--out',required=True); d.add_argument('--limit',type=int); d.add_argument('--case-id',action='append')
     d=sub.add_parser('import-paired'); d.add_argument('--manifest',required=True); d.add_argument('--out',required=True)
+    d=sub.add_parser('prepare-cardiac-annotations')
+    d.add_argument('--inventory',required=True); d.add_argument('--manifest',required=True)
+    d.add_argument('--annotations',required=True); d.add_argument('--out',required=True)
+    d.add_argument('--half-width-vox',type=float,default=2.); d.add_argument('--split')
     d=sub.add_parser('validate-data'); d.add_argument('--manifest',required=True); d.add_argument('--split'); d.add_argument('--allow-no-target',action='store_true')
     d=sub.add_parser('convert-weights'); d.add_argument('--input',required=True); d.add_argument('--out',required=True); d.add_argument('--stage',type=int,choices=[1,2],required=True)
     d.add_argument('--profile',choices=['official_v1','pig_ordered_v1'],default='official_v1'); d.add_argument('--intensity-domain',choices=['mu','calibrated_mu','hu','legacy'],required=True)
@@ -31,9 +35,9 @@ def parser():
             group=d.add_mutually_exclusive_group(); group.add_argument('--resume'); group.add_argument('--init-from-stage1'); group.add_argument('--init-from-stage2')
     d=sub.add_parser('infer'); d.add_argument('--checkpoint',required=True); d.add_argument('--manifest',required=True); d.add_argument('--out',required=True)
     d.add_argument('--split'); d.add_argument('--split-name',choices=['train','val','test','all'],default='test'); d.add_argument('--mode',choices=['full','tiled'],default='tiled')
-    d.add_argument('--tile',nargs=3,type=int,default=[32,128,128]); d.add_argument('--overlap',nargs=3,type=int,default=[16,64,64]); d.add_argument('--device',default='cuda'); d.add_argument('--fp32',action='store_true'); d.add_argument('--export',nargs='+',choices=['h5','tif','nii'],default=['h5'])
-    d=sub.add_parser('evaluate'); d.add_argument('--predictions',required=True); d.add_argument('--manifest',required=True); d.add_argument('--metric-config'); d.add_argument('--projection',action='store_true'); d.add_argument('--out',required=True)
-    d=sub.add_parser('benchmark'); d.add_argument('--config'); d.add_argument('--stage',type=int,choices=[1,2],default=2); d.add_argument('--phase-count',type=int,default=11); d.add_argument('--steps',type=int,default=2); d.add_argument('--weights'); d.add_argument('--out')
+    d.add_argument('--tile',nargs=3,type=int); d.add_argument('--overlap',nargs=3,type=int); d.add_argument('--device',default='cuda'); d.add_argument('--fp32',action='store_true'); d.add_argument('--export',nargs='+',choices=['h5','tif','nii'],default=['h5'])
+    d=sub.add_parser('evaluate'); d.add_argument('--predictions',required=True); d.add_argument('--manifest',required=True); d.add_argument('--metric-config'); d.add_argument('--projection',action='store_true'); d.add_argument('--out',required=True); d.add_argument('--contours')
+    d=sub.add_parser('benchmark'); d.add_argument('--config'); d.add_argument('--stage',type=int,choices=[1,2],default=2); d.add_argument('--phase-count',type=int,default=11); d.add_argument('--steps',type=int,default=2); d.add_argument('--weights'); d.add_argument('--out'); d.add_argument('--manifest'); d.add_argument('--split'); d.add_argument('--memory-limit-gib',type=float)
     return p
 
 
@@ -121,6 +125,9 @@ def dispatch(args):
     if command=='import-paired':
         from .data.paired import import_paired
         return {'manifest':str(import_paired(args.manifest,args.out))}
+    if command=='prepare-cardiac-annotations':
+        from .data.cardiac_annotations import prepare_manifest
+        return {'manifest':str(prepare_manifest(args.inventory,args.manifest,args.annotations,args.out,args.half_width_vox,args.split))}
     if command=='validate-data':
         from .data.contracts import validate_manifest
         rows=validate_manifest(args.manifest,args.split,not args.allow_no_target)
@@ -161,9 +168,16 @@ def dispatch(args):
         from .evaluation.report import evaluate_predictions
         cfg=load_config(args.metric_config,'metrics')
         if args.projection: cfg['projection']=True
-        return evaluate_predictions(args.predictions,args.manifest,cfg,args.out)
+        return evaluate_predictions(args.predictions,args.manifest,cfg,args.out,contours=args.contours)
     if command=='benchmark':
-        result=benchmark(load_config(args.config),args.stage,args.phase_count,args.steps,args.weights)
+        config=load_config(args.config)
+        if args.manifest:
+            if args.stage!=2:
+                raise ValueError('Real manifest benchmark is only available for Stage II')
+            from .training.cardiac_benchmark import benchmark_manifest
+            result=benchmark_manifest(config,args.manifest,args.split,args.steps,args.weights,args.memory_limit_gib)
+        else:
+            result=benchmark(config,args.stage,args.phase_count,args.steps,args.weights)
         if args.out: atomic_json(args.out,result)
         return result
     raise ValueError('Unhandled command')
