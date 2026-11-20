@@ -20,6 +20,7 @@ def train_defaults():
         'small_volume':'error','min_valid_fraction':.5,'max_attempts':32,
         'accumulation':1,'micro_batch_size':1,'clip_grad':None,'temporal_roll':False,'init_weights':None,
         'stage2_crop_mode':'legacy',
+        'stage2_sampling':{'center':0.,'uniform':1.,'x_end':0.},
         'stage2_context':{'lncc_radius_vox':[2,2,2], 'support_margin_vox':[31,36,36],
                           'edge_threshold':1e-4, 'variance_threshold':1e-8, 'match_chunk_size':32768,
                           'activation_checkpointing':True},
@@ -99,8 +100,13 @@ def _number(value, name, *, positive=False):
 def _validate_stage2(config):
     motion, prior, boundary = (config['extensions'][key] for key in ('motion','prior','boundary'))
     recipe = config['stage2_context']
-    if config['stage2_crop_mode'] not in ('legacy','core_with_context'):
+    if config['stage2_crop_mode'] not in ('legacy','core_with_context','fixed_input'):
         raise ValueError('Invalid stage2_crop_mode')
+    weights = config['stage2_sampling']
+    for key, weight in weights.items():
+        _number(weight, 'stage2_sampling.'+key)
+    if not math.isclose(sum(weights.values()), 1., rel_tol=0., abs_tol=1e-9):
+        raise ValueError('stage2_sampling probabilities must sum to one')
     if type(recipe['activation_checkpointing']) is not bool:
         raise ValueError('activation_checkpointing must be boolean')
     if motion['mode'] not in ('off','identity','learned') or prior['mode'] not in ('off','image_only','geometry'):

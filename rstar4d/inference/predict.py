@@ -34,7 +34,7 @@ def predict_manifest(checkpoint,manifest,out,split_name='test',mode='tiled',tile
     if not all(k in ck for k in ['stage','model_profile','normalization','intensity_domain']): raise ValueError('Checkpoint lacks inference contracts')
     model=model_from_checkpoint(ck).to(dev)
     recipe=ck.get('stage2_resolved')
-    contextual=recipe and recipe['crop_mode']=='core_with_context'
+    contextual=recipe and recipe['crop_mode'] in ('core_with_context','fixed_input')
     geometry=recipe and recipe['prior']['mode']=='geometry'
     use_context=contextual or model.stage==2 and (model.motion is not None or model.prior_fusion is not None)
     if tile is None:

@@ -31,8 +31,8 @@ def matrix(base):
 
 def write_matrix(base_yaml, out):
     base = load_config(base_yaml)
-    if base['stage2_crop_mode']!='core_with_context':
-        raise ValueError('The eight arms must share core_with_context')
+    if base['stage2_crop_mode'] not in ('core_with_context','fixed_input'):
+        raise ValueError('The eight arms require a shared cardiac crop mode')
     motion = base['extensions']['motion']
     if (motion['surface_weight'] or base['extensions']['boundary']['grad_weight_vox']
             or not motion['struct_weight'] or not motion['smooth_weight']):

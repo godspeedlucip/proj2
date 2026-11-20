@@ -52,16 +52,19 @@ def _loader(dataset,config,epoch,stage,*,sampler=None):
 
 def _matched_draw_order(dataset):
     """Pair matching proposed read shapes while preserving every seeded draw."""
-    if dataset.resolved['crop_mode'] != 'core_with_context' or dataset.samples is not None:
+    mode = dataset.resolved['crop_mode']
+    if mode == 'legacy' or dataset.samples is not None:
         return range(len(dataset))
     buckets = defaultdict(list)
     for draw in range(len(dataset)):
         seed = np.random.SeedSequence([dataset.config['seed'],dataset.epoch,draw,dataset.stage])
         case, core, origin = dataset.proposal(draw,np.random.default_rng(seed))
         phases, *volume = dataset.shapes[case]
-        window = plan_window(volume,origin,core,dataset.resolved['recipe'])
-        shape = tuple(max(sl.stop,start-lo) for sl,start,lo in
-                      zip(window.core,window.stop,window.origin))
+        shape = core
+        if mode == 'core_with_context':
+            window = plan_window(volume,origin,core,dataset.resolved['recipe'])
+            shape = tuple(max(sl.stop,start-lo) for sl,start,lo in
+                          zip(window.core,window.stop,window.origin))
         buckets[(phases,*shape)].append(draw)
     paired, singles = [], []
     for draws in buckets.values():
@@ -119,6 +122,8 @@ def _sample_loss(pred, aux, context, batch, device, stage, resolved, loss_config
     if aux is not None:
         settings = resolved['motion']
         supervision = {'target':target,'source_path':batch['source_path']}
+        if 'motion_reference' in batch:
+            supervision['motion_reference'] = {key:value.to(device) for key,value in batch['motion_reference'].items()}
         if settings['surface_weight']:
             supervision.update({key:batch[key].to(device) for key in ('surface','distance','correspondence')})
         terms = motion_terms(aux,supervision,context,settings,resolved['recipe'])
@@ -186,7 +191,7 @@ def _training_draws(loader, model, device, stage, resolved, loss_config, epoch, 
 
 
 def validate_model(model,records,config,stage,samples,device):
-    data=PatchDataset(records,config,stage,0,len(samples),samples)
+    data=PatchDataset(records,config,stage,0,len(samples),samples,load_motion_reference=False)
     preview = None
     by_sample = {row.get('sample_id', row['case_id']): row for row in records}
     cases=defaultdict(lambda:{'sum':0.,'count':0,'animal_id':None})
@@ -370,6 +375,7 @@ def _train(config,manifest,split,run_dir,stage,resume,init,stop_after_epoch):
                         cardiac_counts[structure+'_l1'] += values['l1']
                         cardiac_counts[structure+'_gradient'] += values['gradient']
                     append_jsonl(run_dir/'cardiac_samples.jsonl',{'epoch':epoch,'draw':index,'animal_id':batch['animal_id'][0],
+                                                                  'sampling_mode':batch['sampling_mode'][0],
                                                                   **window,**diagnostics})
                 else:
                     draw = [batch['sample_id'][0], batch['origin'][0].tolist(), batch['patch_shape'][0].tolist()]

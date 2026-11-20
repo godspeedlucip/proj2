@@ -14,6 +14,21 @@ class InvalidCore(ValueError):
     """The deterministic proposal may be retried with another origin."""
 
 
+def spatial_origin(volume, shape, rng, mode):
+    origin = []
+    for axis, (size, width) in enumerate(zip(volume, shape)):
+        last = max(0, size-width)
+        low, high = 0, last
+        if mode == 'center' and axis in (1,2):
+            low, high = (last+3)//4, 3*last//4
+            if low > high:  # Two equally central integer positions.
+                low, high = high, low
+        elif mode == 'x_end' and axis == 2:
+            low = last
+        origin.append(int(rng.integers(low, high+1)))
+    return origin
+
+
 def epoch_draw_budget(records, config, stage):
     explicit = config['steps_per_epoch'][str(stage)]
     if explicit:
@@ -32,7 +47,7 @@ def epoch_draw_budget(records, config, stage):
 
 
 class PatchDataset(Dataset):
-    def __init__(self,records,config,stage,epoch,length,samples=None):
+    def __init__(self,records,config,stage,epoch,length,samples=None,*,load_motion_reference=True):
         records=sorted(records,key=sample_id)
         self.records=records; self.config=config; self.stage=stage; self.epoch=epoch; self.length=length; self.samples=samples
         self.shapes={}; self.meta={}; self.animals=defaultdict(dict)
@@ -41,9 +56,10 @@ class PatchDataset(Dataset):
         if not records: raise ValueError('No cases in dataset')
         self.patches=[config['stage1_patch']] if stage==1 else config['stage2_patches']
         self.resolved=resolve_stage2(config if 'extensions' in config else validate_train(config),stage)
+        self.load_motion_reference = load_motion_reference
         self.geometry={}
         self.use_annotations=(self.resolved['boundary']['enabled'] or self.resolved['motion']['surface_weight'] > 0)
-        self.contextual=(self.resolved['crop_mode'] == 'core_with_context'
+        self.contextual=(self.resolved['crop_mode'] in ('core_with_context','fixed_input')
                          or self.resolved['motion']['mode'] != 'off' or self.resolved['prior']['mode'] != 'off'
                          or self.use_annotations)
         for i,r in enumerate(records):
@@ -62,7 +78,20 @@ class PatchDataset(Dataset):
 
     def __len__(self): return len(self.samples) if self.samples is not None else self.length
 
-    def proposal(self,index,rng):
+    def sampling_mode(self, index):
+        if self.samples is not None:
+            return 'fixed'
+        weights = self.config.get('stage2_sampling')
+        if self.stage != 2 or not weights or weights['uniform'] == 1.:
+            return 'uniform'
+        # Independent stream preserves the seeded animal, layout and shape draw.
+        rng = np.random.default_rng([self.config['seed'],self.epoch,index,self.stage,1])
+        p = rng.random()
+        if p < weights['center']:
+            return 'center'
+        return 'uniform' if p < weights['center'] + weights['uniform'] else 'x_end'
+
+    def proposal(self,index,rng,*,mode=None):
         if self.samples is not None:
             s=self.samples[index]; return self.by_id[sample_id(s)],s['shape'],s['origin']
         animal=self.animal_ids[int(rng.integers(len(self.animal_ids)))]
@@ -71,16 +100,17 @@ class PatchDataset(Dataset):
         layouts=self.animals[animal][case]
         i=layouts[int(rng.integers(len(layouts)))] if len(layouts)>1 else layouts[0]
         shape=self.patches[int(rng.integers(len(self.patches)))]
-        origin=[int(rng.integers(max(1,n-k+1))) for n,k in zip(self.shapes[i][1:],shape)]
+        origin=spatial_origin(self.shapes[i][1:],shape,rng,mode or self.sampling_mode(index))
         return i,shape,origin
 
     def __getitem__(self,index):
         if index<0 or index>=len(self): raise IndexError(index)
         rng=np.random.default_rng(np.random.SeedSequence([self.config['seed'],self.epoch,index,self.stage]))
-        i,shape,origin=self.proposal(index,rng); r=self.records[i]
+        mode=self.sampling_mode(index)
+        i,shape,origin=self.proposal(index,rng,mode=mode); r=self.records[i]
         for attempt in range(1 if self.samples is not None else self.config['max_attempts']):
             if attempt:
-                origin=[int(rng.integers(max(1,n-k+1))) for n,k in zip(self.shapes[i][1:],shape)]
+                origin=spatial_origin(self.shapes[i][1:],shape,rng,mode)
             slices=tuple(slice(a,min(a+k,n)) for a,k,n in zip(origin,shape,self.shapes[i][1:]))
             with h5py.File(r['path'],'r') as f:
                 mask=np.asarray(f['valid_mask'][(slice(None),)+slices],dtype=bool)
@@ -88,7 +118,9 @@ class PatchDataset(Dataset):
                 mask=np.pad(mask,pads,mode='constant')
                 if float(mask.mean())<self.config['min_valid_fraction']: continue
                 if self.contextual:
-                    return self._context_patch(i,shape,origin,r,f,rng)
+                    batch = self._context_patch(i,shape,origin,r,f,rng)
+                    batch['sampling_mode'] = mode
+                    return batch
                 cbct=np.asarray(f['cbct'][(slice(None),)+slices],dtype=np.float32)
                 target=np.asarray(f['target'][(slice(None),)+slices],dtype=np.float32)
                 prior=np.asarray(f['prior'][slices],dtype=np.float32)
@@ -108,8 +140,10 @@ class PatchDataset(Dataset):
         policy = recipe if self.resolved['crop_mode']=='core_with_context' else {
             'max_displacement_vox':[0]*3,'lncc_radius_vox':[0]*3,'support_margin_vox':[0]*3,'alignment':[1]*3}
         window = plan_window(self.shapes[i][1:],origin,shape,policy)
-        if (self.resolved['crop_mode']=='core_with_context' or self.resolved['motion']['struct_weight']
-                or self.resolved['motion']['surface_weight']):
+        fixed_input = self.resolved['crop_mode']=='fixed_input'
+        motion = self.resolved['motion']
+        match_reference = motion['struct_weight'] or motion['surface_weight']
+        if not fixed_input and (self.resolved['crop_mode']=='core_with_context' or match_reference):
             check_support(window,recipe,paired['valid_mask'],record['case_id'],prior_fov=paired.get('prior_valid_mask'))
         slices = window.slices
         pads = [(0,max(0,core.stop-(stop-start))) for core,start,stop in zip(window.core,window.origin,window.stop)]
@@ -138,9 +172,35 @@ class PatchDataset(Dataset):
                  'origin':torch.tensor(origin),'patch_shape':torch.tensor(shape)}
         if self.use_annotations:
             batch.update(self._annotation_patch(record,phase_indices,slices,pads,ctx['source_fov']))
+        if fixed_input and match_reference and self.load_motion_reference:
+            batch['motion_reference'] = self._motion_reference(
+                record,paired,phase_indices,window,scale,offset)
         return batch
 
-    def _annotation_patch(self,record,phase_indices,slices,pads,valid):
+    def _motion_reference(self,record,paired,phases,window,scale,offset):
+        # Training labels only. A displaced sample may cross an artificial crop
+        # face. The extra voxel supplies the finite difference of its reference.
+        reach = np.ceil(self.resolved['motion']['max_displacement_vox']).astype(int)+1
+        start = np.maximum(0,np.asarray(window.origin)-reach)
+        stop = np.minimum(paired['target'].shape[1:],np.asarray(window.stop)+reach)
+        slices = tuple(slice(lo,hi) for lo,hi in zip(start,stop))
+        # Keep coordinates addressable when a short scan is padded to input size.
+        tail = np.maximum(0,np.add(window.origin,window.core_shape)-stop)
+        pads = [(0,int(n)) for n in tail]
+        selector = (slice(None),*slices)
+        target = np.asarray(paired['target'][selector],np.float32)[phases]
+        valid = np.asarray(paired['valid_mask'][selector],bool)[phases]
+        target = np.pad(target,[(0,0),*pads],mode='edge')
+        valid = torch.from_numpy(np.pad(valid,[(0,0),*pads]))
+        ref = {'target':torch.from_numpy(((target+offset)/scale)[None]),'valid':valid,
+               'offset':torch.as_tensor(np.subtract(window.origin,start),dtype=torch.long)}
+        if self.resolved['motion']['surface_weight']:
+            fields = self._annotation_patch(record,phases,slices,pads,valid,read_bands=False)
+            for name in ('distance','correspondence'):
+                ref[name] = fields[name]
+        return ref
+
+    def _annotation_patch(self,record,phase_indices,slices,pads,valid,*,read_bands=True):
         shape = (len(phase_indices),2,*valid.shape[-3:])
         band = np.zeros(shape,dtype=bool)
         fields = {}
@@ -163,7 +223,7 @@ class PatchDataset(Dataset):
                     selector = (int(i),slice(None),*slices)
                     for key in fields:
                         fields[key][t] = np.pad(file[key][selector],[(0,0),*pads])
-                    if self.resolved['boundary']['enabled']:
+                    if read_bands and self.resolved['boundary']['enabled']:
                         width = self.resolved['boundary']['half_width_vox']
                         local = (file['domain'][selector].astype(bool) & (file['distance'][selector]<=width)
                                  & file['annotation_available'][i,:].astype(bool)[:,None,None,None])
@@ -183,12 +243,12 @@ def validation_samples(records,config,stage):
         subset=PatchDataset([r],config,stage,0,config['validation_samples_per_case'])
         for draw in range(config['validation_samples_per_case']):
             rng=np.random.default_rng(np.random.SeedSequence([config['seed'],stage,case_index,draw,104729]))
-            i,shape,origin=subset.proposal(0,rng)
+            i,shape,origin=subset.proposal(0,rng,mode='uniform')
             for attempt in range(config['max_attempts']):
-                if attempt: origin=[int(rng.integers(max(1,n-k+1))) for n,k in zip(subset.shapes[i][1:],shape)]
+                if attempt: origin=spatial_origin(subset.shapes[i][1:],shape,rng,'uniform')
                 spec={'case_id':r['case_id'],'sample_id':sample_id(r),'shape':list(shape),'origin':list(origin)}
                 try:
-                    fixed=PatchDataset([r],config,stage,0,1,[spec]); fixed[0]
+                    fixed=PatchDataset([r],config,stage,0,1,[spec],load_motion_reference=False); fixed[0]
                     result.append(spec); break
                 except InvalidCore: continue
             else: raise ValueError(f'No valid fixed validation patch for {r["case_id"]}')

@@ -1,6 +1,7 @@
 """Measure Stage II with the real dataset, objective and Adam updates."""
 import gc
 import json
+import math
 import time
 
 import torch
@@ -64,8 +65,9 @@ def benchmark_manifest(config, manifest, split, steps, weights=None, memory_limi
     if steps<1:
         raise ValueError('Benchmark needs at least one measured step')
     resolved = resolve_stage2(config,2)
-    if resolved['crop_mode']!='core_with_context':
-        raise ValueError('Real Stage II benchmark requires core_with_context')
+    fixed_input = resolved['crop_mode']=='fixed_input'
+    if not fixed_input and resolved['crop_mode']!='core_with_context':
+        raise ValueError('Real Stage II benchmark requires a cardiac crop mode')
     sidecars = []
     if resolved['prior']['mode']=='geometry':
         sidecars.extend(('projections','angle_summary'))
@@ -88,6 +90,9 @@ def benchmark_manifest(config, manifest, split, steps, weights=None, memory_limi
         local = {**config,'stage2_patches':[shape]}
         seed_all(config['seed'],config['deterministic'],config['threads'])
         candidates = [r for r in rows if all(a>=b for a,b in zip(r['shape'][1:],shape))]
+        if fixed_input and config['small_volume']=='pad':
+            candidates = [r for r in rows if math.prod(min(n,k) for n,k in zip(r['shape'][1:],shape))
+                          >= math.prod(shape)*config['min_valid_fraction']]
         candidates.sort(key=lambda row:(-row['shape'][0],-int(bool(row.get('annotations'))),row['case_id']))
         if not candidates:
             results.append({'core_shape':shape,'status':'no_eligible_case'})
@@ -100,9 +105,9 @@ def benchmark_manifest(config, manifest, split, steps, weights=None, memory_limi
             if batch is None or candidate['input'].numel()>batch['input'].numel():
                 batch = candidate
         volume = largest[0]['shape'][1:]
-        mid = [(n-k)//2 for n,k in zip(volume,shape)]
+        mid = [max(0,(n-k)//2) for n,k in zip(volume,shape)]
         largest_origin = list(mid)
-        for axis,a in enumerate(resolved['recipe']['alignment']):
+        for axis,a in enumerate(() if fixed_input else resolved['recipe']['alignment']):
             def extent(index):
                 origin = list(mid)
                 origin[axis] = index
@@ -116,7 +121,7 @@ def benchmark_manifest(config, manifest, split, steps, weights=None, memory_limi
             candidate = next(iter(_loader(PatchDataset(largest,local,2,0,1,interior),local,0,2)))
         except InvalidCore:
             candidate = None
-        if candidate is not None and candidate['input'].numel()>batch['input'].numel():
+        if candidate is not None and (fixed_input or candidate['input'].numel()>batch['input'].numel()):
             batch = candidate
         context = batch['context']
         info = {'case_id':batch['case_id'][0],'sample_id':batch['sample_id'][0],

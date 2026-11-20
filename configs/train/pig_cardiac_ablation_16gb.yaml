@@ -1,4 +1,4 @@
-# Shared C/W recipe for the eight arms on the 16 GB pilot.
+# Same paper-sized inputs for every arm, with activation checkpointing.
 device: cuda
 amp: true
 model_profile: official_v1
@@ -10,8 +10,10 @@ gamma: 0.5
 loss: {kind: public_code, ssim_weight: 0.1}
 normalization: {scale: 0.02, offset: 0.0}
 stage1_patch: [1, 256, 256]
-stage2_patches: [[8, 16, 16], [8, 24, 24], [12, 24, 24]]
-stage2_crop_mode: core_with_context
+stage2_patches: [[16, 256, 256], [32, 144, 144], [64, 128, 128]]
+stage2_crop_mode: fixed_input
+stage2_sampling: {center: 0.70, uniform: 0.25, x_end: 0.05}
+small_volume: pad
 stage2_context:
   lncc_radius_vox: [2, 2, 2]
   support_margin_vox: [31, 36, 36]

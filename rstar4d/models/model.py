@@ -38,7 +38,7 @@ def attach_stage2_extensions(model, resolved):
     from .motion import AdjacentMotionFusion
     from .prior_fusion import GeometryPriorFusion
     motion,prior = resolved['motion'],resolved['prior']
-    model.activation_checkpointing = (resolved['crop_mode']=='core_with_context'
+    model.activation_checkpointing = (resolved['crop_mode'] in ('core_with_context','fixed_input')
                                       and resolved['recipe'].get('activation_checkpointing',False))
     device = next(model.parameters()).device
     if motion['mode'] != 'off':

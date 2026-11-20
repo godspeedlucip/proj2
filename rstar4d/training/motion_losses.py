@@ -72,6 +72,8 @@ def _boundary_distance(points, support, origin, get_index):
 def motion_terms(aux, supervision, context, motion, recipe):
     fields = aux['flow_vox'].float()
     valid = context['source_fov']
+    reference = supervision.get('motion_reference', {})
+    source_valid = reference.get('valid',valid)
     radius = recipe['lncc_radius_vox']
     window = tuple(2*r+1 for r in radius)
     zero = fields.sum()*0.
@@ -79,7 +81,7 @@ def motion_terms(aux, supervision, context, motion, recipe):
     counts = dict(windows=0,outside=0,low_contrast=0,cross_core=0,smooth_pairs=0,surface_pairs=0,
                   surface_points=0,surface_outside=0)
     if motion['struct_weight']:
-        descriptors = reference_descriptor(supervision['target'][:,0],valid)
+        descriptors = reference_descriptor(reference.get('target',supervision['target'])[:,0],source_valid)
 
     for b in range(len(fields)):
         bounds = context['core_bounds'][b]
@@ -88,6 +90,9 @@ def motion_terms(aux, supervision, context, motion, recipe):
         hi = [min(n,stop+r) for n,(_,stop),r in zip(valid.shape[-3:],bounds.tolist(),radius)]
         shape = tuple(end-start for start,end in zip(lo,hi))
         patch = tuple(slice(start,end) for start,end in zip(lo,hi))
+        offset = reference['offset'][b] if reference else origin.new_zeros(3)
+        shift = offset.tolist()
+        reference_patch = tuple(slice(start+d,end+d) for start,end,d in zip(lo,hi,shift))
         points = grid_zyx(shape,fields.device) + fields.new_tensor(lo)
         feature_points = grid_zyx(fields.shape[-3:],fields.device) * fields.new_tensor(FEATURE_STRIDE)
         core_features = ((feature_points>=bounds[:,0]) & (feature_points<bounds[:,1])).all(dim=-1)
@@ -95,10 +100,12 @@ def motion_terms(aux, supervision, context, motion, recipe):
         surface_reach = None
         if motion['surface_weight'] and 'correspondence' in supervision:
             reach = tuple(int(np.ceil(v)) for v in motion.get('max_displacement_vox',(8,8,8)))
-            pair_regions = supervision['correspondence'][b]
-            surface_reach = F.max_pool3d(pair_regions.flatten(0,1)[:,None].float(),
+            source_regions = reference.get('correspondence',supervision['correspondence'])[b]
+            source_distance = reference.get('distance',supervision['distance'])[b]
+            surface_reach = F.max_pool3d(source_regions.flatten(0,1)[:,None].float(),
                                          tuple(2*r+1 for r in reach),stride=1,padding=reach)
-            surface_reach = surface_reach.reshape_as(pair_regions).bool()
+            input_slices = tuple(slice(d,d+n) for d,n in zip(shift,valid.shape[-3:]))
+            surface_reach = surface_reach.reshape_as(source_regions)[(...,*input_slices)].bool()
         for j,(t,s) in enumerate(aux['pairs'].tolist()):
             get_index = lambda: _motion_index(supervision,context,b,s)
             if not bool(valid[b,s].any()) and get_index() is None:
@@ -107,7 +114,7 @@ def motion_terms(aux, supervision, context, motion, recipe):
             if motion['struct_weight'] and all(length>=kernel for length,kernel in zip(shape,window)):
                 def pool(x):
                     return F.avg_pool3d(x[None,None],window,stride=1)[0,0]
-                target = descriptors[b,t][patch]
+                target = descriptors[b,t][reference_patch]
                 target_valid = valid[b,t][patch]
                 target_mean = pool(target)
                 target_variance = _variance(target,target_mean,pool)
@@ -118,7 +125,7 @@ def motion_terms(aux, supervision, context, motion, recipe):
                 count = int(eligible.sum())
                 if count:
                     warped = points + flow_to_points(flow,points[None])[0]
-                    sampled,support = pull3d(descriptors[b:b+1,s:s+1],warped[None],valid[b:b+1,s])
+                    sampled,support = pull3d(descriptors[b:b+1,s:s+1],(warped+offset)[None],source_valid[b:b+1,s])
                     sampled,support = sampled[0,0],support[0]
                     source_mean = pool(sampled)
                     source_variance = _variance(sampled,source_mean,pool)
@@ -150,9 +157,9 @@ def motion_terms(aux, supervision, context, motion, recipe):
                     if not len(surface_points):
                         continue
                     warped = surface_points + flow_to_points(flow,surface_points[None])[0]
-                    values,known = pull3d(supervision['distance'][b:b+1,s,k:k+1],
-                                          warped[None],pair_regions[s:s+1])
-                    _,support = pull3d(valid[b:b+1,s:s+1].float(),warped[None],valid[b:b+1,s])
+                    source_points = (warped+offset)[None]
+                    values,known = pull3d(source_distance[None,s,k:k+1],source_points,source_regions[s:s+1,k])
+                    _,support = pull3d(source_valid[b:b+1,s:s+1].float(),source_points,source_valid[b:b+1,s])
                     penalty = _boundary_distance(warped,support[0],origin,get_index)
                     score = torch.where(known[0],values[0,0].clamp(0,radius_vox),radius_vox)+.1*penalty
                     surface_dirs[t,s,k] = (score.mean(),len(score),int((~support).sum()))
