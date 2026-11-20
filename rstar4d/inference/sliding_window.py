@@ -24,11 +24,14 @@ def gaussian_weight(shape):
 
 
 def predict_volume(model,cbct,prior,normalization,mode='tiled',tile=(32,128,128),overlap=(16,64,64),
-                   device='cpu',amp=True,*,context=None,recipe=None):
+                   device='cpu',amp=True,*,context=None,recipe=None,axial_slice=None):
+    """Predict a volume or one axial plane with the same tiled accumulation."""
     if len(cbct.shape)!=4 or prior.shape!=cbct.shape[1:]: raise ValueError('Expected matching TZYX CBCT and ZYX prior')
     model.eval(); device=torch.device(device)
     t,z,y,x=cbct.shape; scale=normalization['scale']; offset=normalization['offset']
     if mode not in ('tiled','full'): raise ValueError('mode must be tiled or full')
+    if axial_slice is not None and (mode!='tiled' or not 0<=axial_slice<z):
+        raise ValueError('axial_slice requires tiled mode and a valid zero-based Z index')
     stage=getattr(model,'stage',2)
     contextual = recipe is not None and stage == 2 and recipe['crop_mode']=='core_with_context'
     def run(c,p, local=None):
@@ -65,7 +68,11 @@ def predict_volume(model,cbct,prior,normalization,mode='tiled',tile=(32,128,128)
         if stage==1: tile[0]=1; overlap[0]=0
         alignment=(1,8,8) if stage==1 else STAGE2_ALIGNMENT
         positions=[starts(n,k,o,a) for n,k,o,a in zip((z,y,x),tile,overlap,alignment)]
-        result=np.zeros(cbct.shape,np.float32); denominator=np.zeros((z,y,x),np.float32)
+        if axial_slice is not None:
+            positions[0]=[start for start in positions[0] if start<=axial_slice<start+tile[0]]
+        spatial_shape=(z,y,x) if axial_slice is None else (y,x)
+        result=np.zeros((t,*spatial_shape),np.float32)
+        denominator=np.zeros(spatial_shape,np.float32)
         weight=gaussian_weight(tile)
         for origin in product(*positions):
             slices=tuple(slice(a,min(a+k,n)) for a,k,n in zip(origin,tile,(z,y,x)))
@@ -81,6 +88,11 @@ def predict_volume(model,cbct,prior,normalization,mode='tiled',tile=(32,128,128)
             else:
                 output=extract(slices,origin,[(0,k-n) for k,n in zip(tile,real)])
                 core=output[(slice(None),*clipped)]
+            if axial_slice is not None:
+                local_z=axial_slice-origin[0]
+                core=core[:,local_z]
+                w=w[local_z]
+                slices=slices[1:]
             result[(slice(None),)+slices]+=core*w
             denominator[slices]+=w
         if not np.all(denominator>0): raise RuntimeError('Uncovered inference voxels')

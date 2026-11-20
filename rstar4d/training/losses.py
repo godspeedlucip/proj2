@@ -39,6 +39,15 @@ def masked_ssim(x,y,valid,data_range=255.,require_xy=False):
 
 
 def compute_loss(pred,target,valid,stage,config):
+    # SSIM subtracts nearly equal moments. TF32 convolution can introduce
+    # negative variances and unstable gradients even for float32 inputs.
+    with torch.autocast(device_type=pred.device.type, enabled=False), torch.backends.cudnn.flags(
+            enabled=torch.backends.cudnn.enabled, benchmark=torch.backends.cudnn.benchmark,
+            deterministic=torch.backends.cudnn.deterministic, allow_tf32=False):
+        return _compute_loss(pred,target,valid,stage,config)
+
+
+def _compute_loss(pred,target,valid,stage,config):
     pred=pred.float(); target=target.float(); valid=valid.bool()
     if pred.shape!=target.shape or valid.shape!=target.shape: raise ValueError('Loss shape mismatch')
     count=int(valid.sum())

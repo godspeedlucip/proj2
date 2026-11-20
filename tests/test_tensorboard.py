@@ -62,6 +62,42 @@ class TensorBoardTests(unittest.TestCase):
         self.assertAlmostEqual(means.values()['struct_weighted'], .075)
         self.assertNotIn('boundary', means.values())
 
+    def test_measured_and_full_validation_slices_survive_resume(self):
+        import h5py
+        from rstar4d.data.contracts import metadata, read_manifest, write_case, write_manifest
+        from rstar4d.utils.io import sha256
+
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(tmp)
+            config, manifest, split = inputs(root)
+            source = read_manifest(manifest)[0]
+            measured = root/'measured.h5'
+            with h5py.File(source['path'],'r') as h5:
+                write_case(measured,h5['cbct'][:],h5['prior'][:],None,h5['valid_mask'][:],
+                           {**metadata(h5),'intensity_domain':'legacy','target_kind':'unavailable'})
+            measured_manifest = root/'measured.jsonl'
+            write_manifest(measured_manifest,[{'case_id':'measured','animal_id':'measured',
+                                               'path':str(measured),'sha256':sha256(measured)}])
+            config['tensorboard_real'] = {'manifest':str(measured_manifest),'phase_label':2,'axial_slice':1}
+            run = root/'with-previews'
+            first = train(config,manifest,split,run,1,stop_after_epoch=1)
+            first_event, = (run/'tensorboard').glob('events.out.tfevents.*')
+            first_event.unlink()
+            finished = train(config,manifest,split,run,1,resume=first['last'])
+            events = EventAccumulator(str(run/'tensorboard')).Reload()
+            for tag in ('measured/prediction','validation_slice/prediction','validation_slice/reference',
+                        'validation_slice/residual','validation_slice/absolute_error'):
+                self.assertEqual([event.step for event in events.Images(tag)],[1,2],tag)
+            first_payload = load_checkpoint(run/'checkpoints/epoch-0001.pt')
+            last_payload = load_checkpoint(finished['last'])
+            previews = last_payload['tensorboard_slices']
+            self.assertEqual(previews['measured']['phase_label'],2)
+            self.assertEqual(previews['measured']['axial_slice'],1)
+            self.assertEqual(previews['validation_slice']['case_id'],'b')
+            self.assertEqual(previews['validation_slice']['axial_slice'],
+                             first_payload['tensorboard_slices']['validation_slice']['axial_slice'])
+            self.assertNotIn('reference',previews['measured']['images'])
+
     def test_preview_honors_fixed_window_and_reference_surfaces(self):
         from validation.cardiac_smoke import fixture
         from rstar4d.data.contracts import read_manifest

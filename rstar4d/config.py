@@ -10,6 +10,7 @@ from .data.context import STAGE2_ALIGNMENT, X2_STRIDE
 def train_defaults():
     return {'seed':2026,'device':'cuda','workers':0,'pin_memory':False,'log_every':10,'threads':4,
         'deterministic':False,'amp':True,'tensorboard':True,'model_profile':'official_v1',
+        'tensorboard_real':{'manifest':None,'phase_label':None,'axial_slice':None},
         'epochs':{'1':60,'2':30},'learning_rate':.00015,'milestones':{'1':[20,30,40],'2':[10,20,25]},
         'gamma':.5,'scheduler':'multistep','min_lr':.00001,'betas':[.9,.999],'weight_decay':0.,
         'loss':{'kind':'public_code','ssim_weight':.1,'window':[0.,.05]},
@@ -17,7 +18,7 @@ def train_defaults():
         'stage1_patch':[1,256,256],'stage2_patches':[[16,128,128],[32,96,96],[64,64,64]],
         'steps_per_epoch':{'1':0,'2':0},'validation_samples_per_case':1,
         'small_volume':'error','min_valid_fraction':.5,'max_attempts':32,
-        'accumulation':1,'clip_grad':None,'temporal_roll':False,'init_weights':None,
+        'accumulation':1,'micro_batch_size':1,'clip_grad':None,'temporal_roll':False,'init_weights':None,
         'stage2_crop_mode':'legacy',
         'stage2_context':{'lncc_radius_vox':[2,2,2], 'support_margin_vox':[31,36,36],
                           'edge_threshold':1e-4, 'variance_threshold':1e-8, 'match_chunk_size':32768,
@@ -58,11 +59,22 @@ def validate_train(cfg):
     cfg=merge_strict(train_defaults(),cfg)
     if type(cfg['tensorboard']) is not bool:
         raise ValueError('tensorboard must be a boolean')
+    preview = cfg['tensorboard_real']
+    if preview['manifest'] is not None and (not isinstance(preview['manifest'],str) or not preview['manifest'].strip()):
+        raise ValueError('tensorboard_real.manifest must be a nonempty path')
+    if preview['phase_label'] is not None and type(preview['phase_label']) is not int:
+        raise ValueError('tensorboard_real.phase_label must be an integer')
+    index = preview['axial_slice']
+    if index is not None and (type(index) is not int or index<0):
+        raise ValueError('tensorboard_real.axial_slice must be a nonnegative integer')
     if cfg['model_profile'] not in ('official_v1','pig_ordered_v1'): raise ValueError('Unknown model profile')
     if cfg['loss']['kind'] not in ('public_code','l1','physical_ssim'): raise ValueError('Unknown loss kind')
     if cfg['scheduler'] not in ('multistep','cosine'): raise ValueError('Unknown scheduler')
     if cfg['small_volume'] not in ('error','pad'): raise ValueError('small_volume must be error or pad')
     if cfg['workers']<0 or cfg['threads']<1 or cfg['accumulation']<1: raise ValueError('Invalid worker/thread/accumulation count')
+    micro_batch = cfg['micro_batch_size']
+    if type(micro_batch) is not int or micro_batch not in (1,2) or cfg['accumulation'] % micro_batch:
+        raise ValueError('micro_batch_size must be 1 or 2 and divide accumulation')
     if cfg['normalization']['scale']<=0 or cfg['learning_rate']<=0: raise ValueError('scale and learning_rate must be positive')
     if not 0<cfg['min_valid_fraction']<=1 or cfg['max_attempts']<1: raise ValueError('Invalid validity sampling limits')
     if cfg['validation_samples_per_case']<1: raise ValueError('validation_samples_per_case must be positive')
@@ -154,6 +166,8 @@ def load_config(path=None,kind='train'):
         if 'calibration' in cfg:
             for key in ['csv','root']:
                 if cfg['calibration'].get(key): cfg['calibration'][key]=str(resolve(cfg['calibration'][key],base))
+        if kind=='train' and cfg['tensorboard_real']['manifest']:
+            cfg['tensorboard_real']['manifest']=str(resolve(cfg['tensorboard_real']['manifest'],base))
     if kind=='train': return validate_train(cfg)
     if kind=='simulation':
         if cfg['calibration']['mode'] not in ('none','post_fdk'): raise ValueError('Calibration must be none or post_fdk')

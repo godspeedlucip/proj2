@@ -27,6 +27,9 @@ class CardiacDeploymentTests(unittest.TestCase):
         full = predict_volume(model,source,source[0],norm,mode='full',**kwargs)
         tiled = predict_volume(model,source,source[0],norm,mode='tiled',**kwargs)
         np.testing.assert_allclose(full,tiled,atol=2e-7)
+        for z in (0,3,8):
+            plane = predict_volume(model,source,source[0],norm,axial_slice=z,**kwargs)
+            np.testing.assert_array_equal(plane,tiled[:,z])
 
     def test_surfaces_in_output_voxels_and_empty_failures(self):
         self.assertTrue(hasattr(report,'surface_metrics'))

@@ -4,23 +4,26 @@ import contextlib
 import copy
 import hashlib
 import json
+from itertools import islice
 import math
 from pathlib import Path
 import time
 import traceback
 import uuid
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from ..config import validate_train, resolve_stage2
 from ..models import create_model, forward_volume, initialize_stage2, attach_stage2_extensions
 from ..data.contracts import validate_manifest, validate_split, snapshot
-from ..data.context import crop_core
+from ..data.context import crop_core, plan_window
 from ..data.sampling import PatchDataset, epoch_draw_budget, validation_samples
 from ..utils.io import atomic_json, append_jsonl, canonical_hash, sha256, code_fingerprint, environment
 from ..utils.seed import seed_all, rng_state, restore_rng
 from .losses import compute_loss, boundary_terms, boundary_scale
 from .motion_losses import motion_terms
-from .tensorboard import CardiacAverages, recover_training_events, validation_preview, write_training_epoch
+from .tensorboard import (CardiacAverages, axial_preview, measured_preview_source,
+                          recover_training_events, validation_preview, write_training_epoch)
 from .checkpoint import append_metrics_csv, publish_epoch, read_resume, restore_history, run_lock
 
 
@@ -41,10 +44,45 @@ def _amp(device,enabled):
     return torch.cuda.amp.autocast(enabled=True) if device.type=='cuda' and enabled else contextlib.nullcontext()
 
 
-def _loader(dataset,config,epoch,stage):
+def _loader(dataset,config,epoch,stage,*,sampler=None):
     generator=torch.Generator().manual_seed(config['seed']+100003*epoch+stage)
-    return DataLoader(dataset,batch_size=1,shuffle=False,num_workers=config['workers'],
+    return DataLoader(dataset,batch_size=1,sampler=sampler,num_workers=config['workers'],
         pin_memory=config['pin_memory'],generator=generator,persistent_workers=False)
+
+
+def _matched_draw_order(dataset):
+    """Pair matching proposed read shapes while preserving every seeded draw."""
+    if dataset.resolved['crop_mode'] != 'core_with_context' or dataset.samples is not None:
+        return range(len(dataset))
+    buckets = defaultdict(list)
+    for draw in range(len(dataset)):
+        seed = np.random.SeedSequence([dataset.config['seed'],dataset.epoch,draw,dataset.stage])
+        case, core, origin = dataset.proposal(draw,np.random.default_rng(seed))
+        phases, *volume = dataset.shapes[case]
+        window = plan_window(volume,origin,core,dataset.resolved['recipe'])
+        shape = tuple(max(sl.stop,start-lo) for sl,start,lo in
+                      zip(window.core,window.stop,window.origin))
+        buckets[(phases,*shape)].append(draw)
+    paired, singles = [], []
+    for draws in buckets.values():
+        count = len(draws) // 2 * 2
+        paired.extend(draws[:count])
+        singles.extend(draws[count:])
+    return paired + singles
+
+
+def _microbatches(loader, width):
+    draws = enumerate(loader)
+    while True:
+        items = tuple(islice(draws,width))
+        if not items:
+            return
+        shape = items[0][1]['input'].shape
+        if all(batch['input'].shape == shape for _,batch in items):
+            yield items
+        else:
+            for item in items:
+                yield (item,)
 
 
 def batch_context(batch, device):
@@ -53,25 +91,33 @@ def batch_context(batch, device):
     return None
 
 
-def compute_batch(model, batch, device, stage, resolved, loss_config, epoch, amp):
-    x,target,valid = (batch[name].to(device) for name in ('input','target','valid'))
-    context = batch_context(batch,device)
+def _training_forward(model, x, context, device, resolved, amp):
     settings = resolved['motion']
     use_motion = any(settings[key] for key in ('struct_weight','smooth_weight','surface_weight'))
     with _amp(device,amp):
         if use_motion:
-            pred,aux = forward_volume(model,x,context=context,return_aux=True)
-        elif context is not None:
-            pred = forward_volume(model,x,context=context)
-        else:
-            pred = forward_volume(model,x)
+            return forward_volume(model,x,context=context,return_aux=True)
+        if context is not None:
+            return forward_volume(model,x,context=context),None
+        return forward_volume(model,x),None
+
+
+def compute_batch(model, batch, device, stage, resolved, loss_config, epoch, amp):
+    context = batch_context(batch,device)
+    pred,aux = _training_forward(model,batch['input'].to(device),context,device,resolved,amp)
+    return _sample_loss(pred,aux,context,batch,device,stage,resolved,loss_config,epoch)
+
+
+def _sample_loss(pred, aux, context, batch, device, stage, resolved, loss_config, epoch):
+    target,valid = (batch[name].to(device) for name in ('target','valid'))
     if context is not None:
         core_pred,core_target,core_valid = (crop_core(value,context) for value in (pred,target,valid))
     else:
         core_pred,core_target,core_valid = pred,target,valid
     loss = compute_loss(core_pred,core_target,core_valid,stage,loss_config)
     diagnostics = {}
-    if use_motion:
+    if aux is not None:
+        settings = resolved['motion']
         supervision = {'target':target,'source_path':batch['source_path']}
         if settings['surface_weight']:
             supervision.update({key:batch[key].to(device) for key in ('surface','distance','correspondence')})
@@ -101,6 +147,42 @@ def compute_batch(model, batch, device, stage, resolved, loss_config, epoch, amp
             }
         diagnostics['boundary_dual_hit'] = int(all(item['voxels']>0 for item in diagnostics['structures'].values()))
     return loss, diagnostics
+
+
+def _compute_microbatch(model, batches, device, stage, resolved, loss_config, epoch, amp):
+    if len(batches)==1:
+        return [compute_batch(model,batches[0],device,stage,resolved,loss_config,epoch,amp)]
+    images = torch.cat([batch['input'] for batch in batches]).to(device)
+    context = None
+    if 'context' in batches[0]:
+        context = {name:torch.cat([batch['context'][name] for batch in batches]).to(device)
+                   for name in batches[0]['context']}
+    prediction,aux = _training_forward(model,images,context,device,resolved,amp)
+    results = []
+    for index,batch in enumerate(batches):
+        item = slice(index,index+1)
+        local = {name:value[item] for name,value in context.items()} if context is not None else None
+        motion = None
+        if aux is not None:
+            motion = {**aux,'flow_vox':aux['flow_vox'][item],'valid_samples':aux['valid_samples'][item],
+                      'origin':local.get('origin')}
+        results.append(_sample_loss(prediction[item],motion,local,batch,device,stage,resolved,loss_config,epoch))
+    return results
+
+
+def _training_draws(loader, model, device, stage, resolved, loss_config, epoch, config, scaler, length):
+    effective = config['accumulation']
+    for items in _microbatches(loader, config['micro_batch_size']):
+        results = _compute_microbatch(model,[batch for _,batch in items],device,stage,resolved,
+                                      loss_config,epoch,config['amp'])
+        for (index,batch),(loss,_) in zip(items,results):
+            if not torch.isfinite(loss['total']):
+                raise FloatingPointError(f'Nonfinite loss at {batch["case_id"]}, epoch={epoch}, draw={index}')
+        group_start = items[0][0] // effective * effective
+        divisor = min(effective,length-group_start)
+        scaler.scale(sum(loss['total'] for loss,_ in results)/divisor).backward()
+        for (index,batch),(loss,diagnostics) in zip(items,results):
+            yield index,batch,loss,diagnostics,len(items)
 
 
 def validate_model(model,records,config,stage,samples,device):
@@ -162,7 +244,13 @@ def _train(config,manifest,split,run_dir,stage,resume,init,stop_after_epoch):
     training=[r for r in rows if str(r['animal_id']) in split['train']]
     validation=[r for r in rows if str(r['animal_id']) in split['val']]
     if not training or not validation: raise ValueError('Training and validation animals/cases are both required')
-    data=snapshot(rows,split); sig=signature(config,data)
+    data=snapshot(rows,split)
+    preview_options=config['tensorboard_real']
+    measured=measured_preview_source(preview_options,resolved) if preview_options['manifest'] else None
+    if measured is not None:
+        data['tensorboard_measured']={key:measured.get(key) for key in
+                                     ('case_id','sha256','projections_sha256','angle_summary_sha256')}
+    sig=signature(config,data)
     if identity and identity['signature']!=sig:
         raise ValueError('Resume rejected: data, split, algorithm/config or implementation changed; use an explicit warm start')
     if saved and (saved['model_profile']!=config['model_profile'] or saved['data_snapshot']!=data or saved['split']!=split):
@@ -251,16 +339,19 @@ def _train(config,manifest,split,run_dir,stage,resume,init,stop_after_epoch):
             begin=time.perf_counter(); model.train()
             if device.type=='cuda': torch.cuda.reset_peak_memory_stats(device)
             dataset=PatchDataset(training,config,stage,epoch,length)
-            loader=_loader(dataset,config,epoch,stage)
+            order = _matched_draw_order(dataset) if config['micro_batch_size']>1 else None
+            loader=_loader(dataset,config,epoch,stage,sampler=order)
             total_loss=0.; total_l1=0.; skipped=0; valid_ratios=[]; amp_overflows=0; epoch_updates=0; shape_counts=Counter(); animal_counts=Counter()
             cardiac_counts=Counter(); draws=hashlib.sha256()
             cardiac_means = CardiacAverages()
+            micro_batch_samples = Counter()
             optimizer.zero_grad(set_to_none=True)
-            for index,batch in enumerate(loader):
+            for index,batch,loss,diagnostics,physical_size in _training_draws(
+                    loader,model,device,stage,resolved,loss_config,epoch,config,scaler,length):
                 x=batch['input']; valid=batch['valid']
                 context = batch.get('context')
+                micro_batch_samples[physical_size] += 1
                 shape_counts['x'.join(map(str,x.shape[2:]))]+=1; animal_counts[batch['animal_id'][0]]+=1
-                loss, diagnostics = compute_batch(model,batch,device,stage,resolved,loss_config,epoch,config['amp'])
                 cardiac_means.update(diagnostics)
                 window = {}
                 if context is not None:
@@ -283,11 +374,6 @@ def _train(config,manifest,split,run_dir,stage,resume,init,stop_after_epoch):
                 else:
                     draw = [batch['sample_id'][0], batch['origin'][0].tolist(), batch['patch_shape'][0].tolist()]
                     draws.update(json.dumps(draw).encode())
-                if not torch.isfinite(loss['total']): raise FloatingPointError(f'Nonfinite loss at {batch["case_id"]}, epoch={epoch}, draw={index}')
-                # Average over the actual size of each accumulation group, including the final short group.
-                group_start=(index//config['accumulation'])*config['accumulation']
-                group_size=min(config['accumulation'],length-group_start)
-                scaler.scale(loss['total']/group_size).backward()
                 if (index+1)%config['accumulation']==0 or index+1==length:
                     scaler.unscale_(optimizer)
                     finite_gradients=all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters())
@@ -307,12 +393,20 @@ def _train(config,manifest,split,run_dir,stage,resume,init,stop_after_epoch):
                 valid_ratios.append(float(crop_core(valid,context).float().mean() if context is not None else valid.float().mean()))
                 if (index+1)%config['log_every']==0 or index+1==length:
                     append_jsonl(run_dir/'train.jsonl',{'event':'batch','epoch':epoch,'stage':stage,'draw':index,'step':step,
-                        'case_id':batch['case_id'][0],'sample_id':batch['sample_id'][0],'shape':list(x.shape),'l1':float(loss['l1'].detach()),
+                        'case_id':batch['case_id'][0],'sample_id':batch['sample_id'][0],'shape':list(x.shape),
+                        'physical_batch_size':physical_size,'l1':float(loss['l1'].detach()),
                         'total':float(loss['total'].detach()),'valid_fraction':valid_ratios[-1],'skipped_ssim':loss['skipped_ssim']})
             if skipped==length and loss_config['kind']!='l1' and loss_config['ssim_weight']>0:
                 raise ValueError('No valid SSIM windows during entire epoch; change explicit patch/mask/loss configuration')
             if epoch_updates==0: raise FloatingPointError('No optimizer updates in epoch: AMP overflow calibration exhausted the tiny epoch; use more draws or explicit fp32')
             evaluation=validate_model(model,validation,config,stage,samples,device)
+            slice_previews={}
+            if measured is not None and config['tensorboard']:
+                sample=evaluation['preview']['sample_id']
+                validation_record=next(row for row in validation if row['sample_id']==sample)
+                slice_previews['measured']=axial_preview(model,measured,config,resolved,device,
+                    phase_label=preview_options['phase_label'],axial_slice=preview_options['axial_slice'])
+                slice_previews['validation_slice']=axial_preview(model,validation_record,config,resolved,device)
             improved=evaluation['l1']<best
             if improved: best=evaluation['l1']; best_epoch=epoch
             lr_used=optimizer.param_groups[0]['lr']; scheduler.step()
@@ -322,6 +416,7 @@ def _train(config,manifest,split,run_dir,stage,resume,init,stop_after_epoch):
                 'peak_allocated_gib':torch.cuda.max_memory_allocated(device)/1024**3 if device.type=='cuda' else 0.,
                 'skipped_ssim':skipped,'amp_overflows':amp_overflows,'optimizer_updates':epoch_updates,
                 'sample_count':length,'sampling_sha256':draws.hexdigest(),
+                'effective_batch_size':config['accumulation'],'samples_by_physical_batch':dict(micro_batch_samples),
                 'shape_counts_tzyx':dict(shape_counts),'animal_draw_counts':dict(animal_counts),
                 'valid_fraction':sum(valid_ratios)/len(valid_ratios),'validation_cases':evaluation['cases']}
             if getattr(dataset,'contextual',False):
@@ -338,6 +433,8 @@ def _train(config,manifest,split,run_dir,stage,resume,init,stop_after_epoch):
                 'intensity_domain':rows[0]['metadata']['intensity_domain'],'calibration_application':rows[0]['metadata']['calibration_application']}
             if evaluation['preview'] is not None:
                 payload['tensorboard_preview'] = evaluation['preview']
+            if slice_previews:
+                payload['tensorboard_slices'] = slice_previews
             if stage==2:
                 payload['stage2_resolved']=resolved
             publish_epoch(ckdir,payload)

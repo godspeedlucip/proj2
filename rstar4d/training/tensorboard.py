@@ -11,6 +11,9 @@ import h5py
 import torch
 
 from .checkpoint import atomic_file, load_checkpoint
+from ..data.acquisition import load_geometry
+from ..data.contracts import validate_manifest
+from ..inference.sliding_window import predict_volume
 from ..utils.io import sha256
 
 
@@ -106,6 +109,63 @@ def validation_preview(x, pred, target, batch, record, config):
     return preview
 
 
+def measured_preview_source(options, resolved):
+    """Validate the separately provided, unlabeled reconstruction preview."""
+    sidecars = ('projections','angle_summary') if resolved['prior']['mode']=='geometry' else ()
+    rows = validate_manifest(options['manifest'],require_target=False,full=False,
+                             sidecars=sidecars,prefer_angle_summary=True)
+    if len(rows)!=1:
+        raise ValueError('TensorBoard measured preview requires exactly one manifest case')
+    record=rows[0]
+    labels=record['metadata']['phase_labels']
+    if options['phase_label'] is not None and options['phase_label'] not in labels:
+        raise ValueError('TensorBoard measured preview phase is not in the manifest')
+    if options['axial_slice'] is not None and options['axial_slice']>=record['shape'][1]:
+        raise ValueError('TensorBoard measured preview axial index is outside the volume')
+    if sidecars:
+        load_geometry(record,labels)
+    return record
+
+
+def axial_preview(model, record, config, resolved, device, *, phase_label=None, axial_slice=None):
+    """Read only the tiles contributing to a fixed full axial slice."""
+    labels = record['metadata']['phase_labels']
+    phase = len(labels)//2 if phase_label is None else labels.index(phase_label)
+    z = record['shape'][1]//2 if axial_slice is None else axial_slice
+    lo, hi = config['loss']['window']
+    tile = config['stage1_patch'] if model.stage==1 else resolved['recipe']['core_shapes'][-1]
+    alignment = (1,8,8) if model.stage==1 else (2,8,8)
+    tile = tuple(((k+a-1)//a)*a for k,a in zip(tile,alignment))
+
+    def display(plane):
+        return ((plane-lo)/(hi-lo)).clamp(0,1).mul(255).round().to(torch.uint8)[None]
+
+    with h5py.File(record['path'],'r') as source:
+        context = {'case_id':record['case_id'],'source_fov':source['valid_mask'],
+                   'prior_fov':source.get('prior_valid_mask'),'phase_labels':labels}
+        if resolved['prior']['mode']=='geometry':
+            context['geometry'] = load_geometry(record,labels)
+        prediction = predict_volume(model,source['cbct'],source['prior'],config['normalization'],
+                                    tile=tile,overlap=(0,0,0),device=device,amp=config['amp'],
+                                    context=context,recipe=resolved,axial_slice=z)
+        predicted = torch.from_numpy(prediction[phase])
+        images = {'prediction':display(predicted),
+                  'sparse':display(torch.from_numpy(source['cbct'][phase,z]))}
+        if 'target' in source:
+            target = torch.from_numpy(source['target'][phase,z])
+            valid = torch.from_numpy(source['valid_mask'][phase,z]).bool()
+            difference = (predicted-target).masked_fill(~valid,0)
+            unit = (difference/(hi-lo)).clamp(-1,1)
+            positive, negative = unit.clamp_min(0), (-unit).clamp_min(0)
+            images['reference'] = display(target)
+            images['absolute_error'] = (unit.abs()*255).round().to(torch.uint8)[None]
+            images['residual'] = (torch.stack((positive,torch.zeros_like(unit),negative))*255).round().to(torch.uint8)
+    return {'images':images,'case_id':record['case_id'],'sample_id':record['sample_id'],
+            'source_sha256':record['sha256'],'phase_label':labels[phase],'axial_slice':z,
+            'window':[lo,hi],'residual_display_range':[lo-hi,hi-lo],
+            'residual_convention':'prediction minus reference; red positive, blue negative'}
+
+
 @contextmanager
 def _event_file(directory, step):
     """TensorBoard recognizes the final name only after the writer has flushed and closed."""
@@ -158,6 +218,11 @@ def write_training_epoch(run_dir, payload):
                 writer.add_image('validation/' + key, image, epoch)
             metadata = {k: v for k, v in preview.items() if k != 'images'}
             writer.add_text('validation/sample', json.dumps(metadata, ensure_ascii=False), epoch)
+        for group, plane in payload.get('tensorboard_slices', {}).items():
+            for key, image in plane['images'].items():
+                writer.add_image(group + '/' + key, image, epoch)
+            metadata = {k:v for k,v in plane.items() if k!='images'}
+            writer.add_text(group + '/sample',json.dumps(metadata,ensure_ascii=False),epoch)
 
 
 def recover_training_events(run_dir, completed_epoch, enabled=True):
