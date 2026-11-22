@@ -5,6 +5,7 @@ This is a copy of the Round contrast simulation pipeline. On the standalone
 
 - `generate_round1_contrast_recon.py`: phase projections, full prior, and sparse FDK reconstructions.
 - `generate_round1_contrast_gt.py`: matched per-phase GT from full-angle projection and FDK of each phase CT.
+- `generate_round1_contrast_gt_direct.py`: per-phase GT resampled directly from source CT on the same output grid.
 - `generate_round1_contrast_mask.py`: annotated phase segmentation masks mapped to the GT/reconstruction grid.
 - `generate_pig_first_phase_prior.py`: shared HU-to-attenuation conversion and reconstruction postprocessing.
 - `series_calibration.py`: per-series calibration lookup and post-FDK polynomial application.
@@ -20,16 +21,26 @@ series.
 ```powershell
 python generate_round1_contrast_recon.py --round-root data/pig/AHFP-Round-2 --settings-csv settings/heart_only/round2_heart_gt_settings.csv --cycle-csv settings/heart_only/cycle.csv --calibration-csv settings/heart_only/round2_heart_calibration.csv --output-root outputs/round2_contrast_recon --list
 python generate_round1_contrast_gt.py --round-root data/pig/AHFP-Round-2 --settings-csv settings/heart_only/round2_heart_gt_settings.csv --calibration-csv settings/heart_only/round2_heart_calibration.csv --recon-root outputs/round2_contrast_recon --output-root outputs/round2_contrast_gt --list
+python generate_round1_contrast_gt_direct.py --round-root data/pig/AHFP-Round-2 --settings-csv settings/heart_only/round2_heart_gt_settings.csv --calibration-csv settings/heart_only/round2_heart_calibration.csv --recon-root outputs/round2_contrast_recon --output-root outputs/round2_contrast_gt_direct --list
 python generate_round1_contrast_mask.py --round-root data/pig/AHFP-Round-2 --settings-csv settings/heart_only/round2_heart_gt_settings.csv --recon-root outputs/round2_contrast_recon --gt-root outputs/round2_contrast_gt --output-root outputs/round2_contrast_mask --list
 ```
 
-Remove `--list` to generate data. Use the same settings and calibration CSVs for
-both commands so the GT matches the sparse reconstruction grid. Each GT uses
-all scan angles from its own phase, while the prior uses the phase-mixed scan
-and each sparse reconstruction uses only its assigned phase angles. TIGRE and
-a CUDA GPU are required for both generation commands. No CT volumes or
-generated output images are included in this branch. In the original local
-workspace, prefix script and settings paths in these examples with `get_data/`.
+Remove `--list` to generate data. Use the same settings and calibration CSVs
+for reconstruction and either GT command. Full-view GT uses all scan angles
+from its own phase. The prior uses the phase-mixed scan and each sparse
+reconstruction uses only its assigned phase angles. Both FDK commands require
+TIGRE and a CUDA GPU.
+
+Direct GT converts each source CT to attenuation and resamples it on the CPU
+with the same FOV, shifts, voxel spacing, and valid-mask rule. When a calibration
+CSV is supplied, the polynomial is applied after resampling and exact zeros are
+preserved. Use a separate output root for each GT method. Both GT commands
+default to TIFF and accept `--output-format nii` or `--output-format both`.
+To generate segmentation masks against direct GT, pass its output directory
+as `--gt-root`.
+
+In the original local workspace, prefix script and settings paths in these
+examples with `get_data/`.
 
 The optional `fov_source_pixels` CSV column sets the transverse physical FOV
 in CSV-adjusted source voxel counts while `fov_output_pixels` keeps the output
@@ -42,16 +53,16 @@ Source CT voxels equal to exactly `-2048 HU` are treated as missing data. They
 are excluded from HU-to-attenuation conversion and are zero in the volumes
 passed to TIGRE. Valid CT voxels are converted to attenuation before projection.
 The calibration polynomial is applied to the reconstructed prior, sparse images,
-and GT after FDK, while exact-zero background remains zero. With
+and full-view GT after FDK, while exact-zero background remains zero. With
 `--no-calibration`, no polynomial adjustment is applied. GT reconstruction is
 zeroed outside the valid source sampling region. Each `phase_XX_gt` has a matching
-`phase_XX_gt_valid_mask.tif` and `.nii.gz`: value 1 means every interpolation
+`phase_XX_gt_valid_mask` in the selected format. Value 1 means every interpolation
 source was valid and the voxel lies inside the output FOV; value 0 means it
 must be excluded from supervised loss or image metrics. Both files share the
 same shape and voxel spacing.
 
 When settings or calibration change, regenerate reconstruction before GT.
-The GT configuration signature invalidates older direct-sampling GT outputs.
+The GT configuration records which method produced the outputs.
 
 For segmentation labels, remove `--list` from the mask command. Only CT phases
 with a matching `IMxxxxx_mask.nii.gz` are processed. The script preserves
