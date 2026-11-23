@@ -76,7 +76,7 @@ def evaluate_pairs(predictor, records, split, output_directory, save_probabiliti
     output_directory = Path(output_directory)
     check_prediction_destinations(
         [record["case_id"] for record in records], records if source_records is None else source_records,
-        output_directory, predictor.dataset_json["file_ending"], save_probabilities,
+        output_directory, predictor.dataset_json["file_ending"], save_probabilities, phases=predictor.phase_order,
     )
     label_manager = predictor.plans_manager.get_label_manager(predictor.dataset_json)
     label_names = {

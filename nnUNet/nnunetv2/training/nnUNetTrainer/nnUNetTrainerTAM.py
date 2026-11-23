@@ -23,6 +23,7 @@ from nnunetv2.utilities.paired_tam_contract import (
     PHASES,
     json_digest,
     make_checkpoint_contract,
+    planned_context_phases,
     validate_plans,
 )
 from nnunetv2.utilities.plans_handling.plans_handler import PlansManager
@@ -41,9 +42,25 @@ class _PreparedPairDataset(nnUNetDatasetNumpy):
 
 
 class PairedDataLoader(nnUNetDataLoader):
+    def determine_shapes(self):
+        data_shape, seg_shape = super().determine_shapes()
+        supervised_count = len(PHASES)
+        selected_count = supervised_count + (data_shape[1] > supervised_count)
+        return (data_shape[0], selected_count, *data_shape[2:]), seg_shape
+
+    def _crop_data(self, data, bbox):
+        supervised_count = len(PHASES)
+        if data.shape[0] == supervised_count:
+            return super()._crop_data(data, bbox)
+        query = (np.random.randint(supervised_count, data.shape[0])
+                 if getattr(self._data, "sample_context", False) else supervised_count)
+        anchors = super()._crop_data(data[:supervised_count], bbox)
+        context = super()._crop_data(data[query:query + 1], bbox)
+        return np.concatenate((anchors, context))
+
     def generate_train_batch(self):
         batch = super().generate_train_batch()
-        # The base loader crops and transforms both phases together as channels.
+        # Apply one spatial transform across all CTs and the two available masks.
         batch["data"] = torch.as_tensor(batch["data"]).unsqueeze(2)
         target = batch["target"]
         if isinstance(target, list):
@@ -89,16 +106,18 @@ class _PairedTAMTrainer(nnUNetTrainer):
         self.inference_allowed_mirroring_axes = MIRROR_AXES
         self.probabilistic_oversampling = True
         self.training_seed = None
+        self.context_phases = planned_context_phases(self.configuration_manager)
         self.prepared = Path(self.preprocessed_dataset_folder_base)
         fingerprint = read_json(self.prepared / "dataset_fingerprint.json")
-        if (fingerprint["fold"] != fold or fingerprint["phase_order"] != list(PHASES)
+        if (fingerprint["fold"] != fold or fingerprint["phase_order"] != list(PHASES + self.context_phases)
                 or fingerprint["foreground_intensity_properties_per_channel"]
                 != manager.foreground_intensity_properties_per_channel):
             raise ValueError("The prepared fold fingerprint does not match the supplied fold and plans.")
         if (json_digest(read_json(self.prepared / "plans.json")) != json_digest(plans)
                 or json_digest(read_json(self.prepared / "dataset.json")) != json_digest(dataset_json)):
             raise ValueError("Use the plans.json and dataset.json from the prepared fold.")
-        self.records = read_manifest(self.prepared / "paired_manifest.json", require_labels=True)
+        self.records = read_manifest(self.prepared / "paired_manifest.json", require_labels=True,
+                                     context_phases=self.context_phases)
         self.fingerprint = fingerprint
         validate_sources(self.records, fingerprint)
         splits = read_json(self.prepared / "splits_final.json")
@@ -151,6 +170,11 @@ class _PairedTAMTrainer(nnUNetTrainer):
 
     def do_split(self):
         return list(self.split["train"]), list(self.split["val"])
+
+    def get_tr_and_val_datasets(self):
+        training, validation = super().get_tr_and_val_datasets()
+        training.sample_context = bool(self.context_phases)
+        return training, validation
 
     def plot_network_architecture(self):
         # nnU-Net's plotter passes a single (unpaired) volume.
@@ -231,7 +255,7 @@ class _PairedTAMTrainer(nnUNetTrainer):
             loss = self.loss(output, target)
         if isinstance(output, (tuple, list)):
             output, target = output[0], target[0]
-        predictions = output.argmax(2)
+        predictions = output[:, :len(PHASES)].argmax(2)
         truth = target.squeeze(2)
         valid = truth != self.label_manager.ignore_label if self.label_manager.has_ignore_label else True
         phase_stats = []

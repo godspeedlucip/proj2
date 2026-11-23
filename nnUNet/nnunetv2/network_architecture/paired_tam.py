@@ -6,7 +6,7 @@ from torch import Tensor, nn
 from torch.nn.functional import scaled_dot_product_attention
 
 from nnunetv2.utilities.get_network_from_plans import get_network_from_plans
-from nnunetv2.utilities.paired_tam_contract import PHASES
+from nnunetv2.utilities.paired_tam_contract import PHASES, validate_context_phases
 
 
 _ATTENTION_STAGE_COUNT = {"C1": 0, "C3": 1, "C4": 2, "C5": 3}
@@ -67,8 +67,8 @@ class TAM3D(nn.Module):
 
 
 def _get_embedding_overrides(tam_kwargs, n_stages):
-    if not isinstance(tam_kwargs, Mapping) or set(tam_kwargs) - {"embed_dim_by_stage"}:
-        raise ValueError("TAM plans accept an embed_dim_by_stage mapping")
+    if not isinstance(tam_kwargs, Mapping) or set(tam_kwargs) - {"embed_dim_by_stage", "context_phases"}:
+        raise ValueError("TAM plans accept an embed_dim_by_stage mapping and context_phases")
     overrides = tam_kwargs.get("embed_dim_by_stage", {})
     if not isinstance(overrides, Mapping):
         raise ValueError("TAM embed_dim_by_stage must map stage indices to embedding widths")
@@ -101,7 +101,9 @@ class PairedPlainConvUNet(PlainConvUNet):
         if n_stages < max(2, stage_count):
             raise ValueError(f"PlainConvUNet has too few encoder stages for paired TAM preset {tam_preset}")
         overrides = _get_embedding_overrides(tam_kwargs, n_stages)
+        context_phases = validate_context_phases(tam_kwargs.get("context_phases", ()))
         super().__init__(input_channels=input_channels, num_classes=num_classes, **architecture_kwargs)
+        self.input_phase_count = len(PHASES) + bool(context_phases)
         # Initialize the shared backbone before drawing any TAM parameters.
         self.apply(self.initialize)
 
@@ -124,10 +126,12 @@ class PairedPlainConvUNet(PlainConvUNet):
             "embed_dim_by_stage": embedding_dims,
             "phase_order": list(PHASES),
         }
+        if context_phases:
+            self.tam_metadata["context_phases"] = list(context_phases)
 
     def forward(self, x: Tensor) -> Tensor | list[Tensor]:
-        if x.ndim != 6 or x.shape[1:3] != (len(PHASES), 1):
-            raise ValueError(f"Paired TAM expects [B, 2, 1, D, H, W], got {tuple(x.shape)}")
+        if x.ndim != 6 or x.shape[1:3] != (self.input_phase_count, 1):
+            raise ValueError(f"Paired TAM expects [B, {self.input_phase_count}, 1, D, H, W], got {tuple(x.shape)}")
         case_and_phase = x.shape[:2]
         x = x.flatten(0, 1)
         skips = []

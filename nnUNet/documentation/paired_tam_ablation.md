@@ -1,6 +1,6 @@
-# 成对 TAM 3D nnU-Net 消融实验
+# 3D nnU-Net + TAM 心脏 CT 分割
 
-成对入口适用于单卡、单通道心脏 CT、互斥类别和 `3d_fullres` PlainConvUNet。每例的网络输入和预测均固定为 `[phase1, phase5]`。令 `L` 为编码器总阶段数，阶段索引从零开始。
+入口适用于单卡、单通道心脏 CT、互斥类别和 `3d_fullres` PlainConvUNet。两时相消融固定输入 `[phase1, phase5]`。使用 `--context-phases` 可训练三时相稀疏监督模型，逐一预测其余真实时相。令 `L` 为编码器总阶段数，阶段索引从零开始。
 
 | 预设 | TAM 插入阶段 | 六阶段时的索引 |
 | --- | --- | --- |
@@ -39,6 +39,23 @@ python -m nnunetv2.run.paired_tam prepare manifest.json splits.json "$env:nnUNet
 
 每个 dataset、plans 版本和折使用独立的空输出目录。成对预处理冻结训练患者两期前景的 CT 统计，并保存原始几何、患者划分及源文件指纹。对输入文件的修改需要重新准备一折。
 
+### 十期 CT 仅标注 phase1 和 phase5
+
+为每例在同一清单中补齐 `phase2`、`phase3`、`phase4`、`phase6` 到 `phase10`。每个额外时相写成 `"phase7": {"image": "ct/acq_001_p7.nii.gz"}` 这样的图像条目。标注路径仍写在 `phase1` 和 `phase5`。独立预测清单可省略所有 `label` 项。
+
+```powershell
+$plans = "$env:nnUNet_preprocessed/Dataset990_TAMReference/nnUNetPlans.json"
+$prepared = "paired/Dataset990_TAMReference/nnUNetPlans/sparse_fold_0"
+python -m nnunetv2.run.paired_tam prepare manifest.json splits.json $plans dataset.json $prepared --fold 0 --context-phases phase2 phase3 phase4 phase6 phase7 phase8 phase9 phase10
+python -m nnunetv2.run.paired_tam profile $prepared profiles/sparse_c5.json --preset C5 --device cuda
+python -m nnunetv2.run.paired_tam train $prepared runs/sparse_c5 --preset C5 --fold 0 --seed 12345 --device cuda
+python -m nnunetv2.run.paired_tam predict runs/sparse_c5 image_only_manifest.json predictions/sparse_c5 --fold 0 --device cuda
+```
+
+预处理将配置的图像和两份标注缓存到共同网格。每个训练 patch 使用 `[phase1, phase5, 目标期]`，目标期从配置的额外时相随机抽取。每次前向输出三份分割，两期监督损失等权平均。推理遍历额外时相，分别保留各组第三个输出，并从第一个组合取两期参考输出。以上命令每例导出十份原始网格分割。评估仅对两期人工掩膜计算 Dice 和 HD95。
+
+这个模式采用论文表 2 的稀疏监督与表 1 的 C5 插入位置。把三维心脏 CT 编码阶段接入 nnU-Net，以及用三期一组遍历十期，是本项目的迁移设计。[TAM 论文](https://doi.org/10.1016/j.media.2026.103981)
+
 ## 预试并锁定训练设置
 
 在同一 CUDA 环境先预试 C5，再用同一份 plans 检查全部四组。预试测量前向、反向和优化器更新，并对一个验证病例运行成对滑窗。JSON 中包含每步用时、显存峰值和实际配置。
@@ -71,4 +88,4 @@ python -m nnunetv2.run.paired_tam evaluate $prepared runs/c5 --split test --fold
 python -m nnunetv2.run.paired_tam predict runs/c5 predict_manifest.json predictions/c5 --fold 0 --device cuda
 ```
 
-独立预测重载 checkpoint，为每个病例输出 `<case_id>_phase1` 和 `<case_id>_phase5` 掩膜。两份输出分别恢复至各时相原始网格。
+独立预测重载 checkpoint，在各时相的原始网格导出 `<case_id>_<phase>` 掩膜。输出时相由训练时的 plans 决定。

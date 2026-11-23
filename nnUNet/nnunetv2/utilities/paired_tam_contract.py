@@ -1,10 +1,12 @@
 import hashlib
 import json
 import math
+from collections.abc import Mapping
 
 import numpy as np
 
 PHASES = ("phase1", "phase5")
+CONTEXT_PHASES = tuple(f"phase{index}" for index in (2, 3, 4, 6, 7, 8, 9, 10))
 CONFIGURATION = "3d_fullres"
 TILE_STEP_SIZE = 0.5
 MIRROR_AXES = (0, 1, 2)
@@ -14,6 +16,21 @@ TRAINER_PRESETS = {f"nnUNetTrainerTAM{preset}": preset for preset in ("C1", "C3"
 def json_digest(value):
     content = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def validate_context_phases(phases):
+    if not isinstance(phases, (list, tuple)) or any(phase not in CONTEXT_PHASES for phase in phases):
+        raise ValueError(f"TAM context phases must be selected from {CONTEXT_PHASES}.")
+    if len(set(phases)) != len(phases):
+        raise ValueError("TAM context phases must be unique.")
+    return tuple(phases)
+
+
+def planned_context_phases(configuration_manager):
+    options = configuration_manager.network_arch_init_kwargs.get("tam", {})
+    if not isinstance(options, Mapping):
+        raise ValueError("TAM plans must contain a mapping of TAM options.")
+    return validate_context_phases(options.get("context_phases", ()))
 
 
 def validate_plans(plans_manager, configuration_manager, dataset_json):

@@ -1,9 +1,10 @@
-"""Data preparation for paired phase1/phase5 CT using one 3d_fullres plan."""
+"""Prepare annotated CT anchors and optional unlabeled context phases."""
 
 import hashlib
 import json
 import os
 import re
+from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -16,7 +17,9 @@ from nnunetv2.preprocessing.normalization.default_normalization_schemes import C
 from nnunetv2.preprocessing.preprocessors.default_preprocessor import DefaultPreprocessor
 from nnunetv2.preprocessing.resampling.default_resampling import compute_new_shape
 from nnunetv2.training.dataloading.nnunet_dataset import nnUNetDatasetNumpy
-from nnunetv2.utilities.paired_tam_contract import CONFIGURATION, PHASES, validate_plans
+from nnunetv2.utilities.paired_tam_contract import (
+    CONFIGURATION, PHASES, planned_context_phases, validate_context_phases, validate_plans,
+)
 from nnunetv2.utilities.paired_tam_io import read_image
 from nnunetv2.utilities.plans_handling.plans_handler import PlansManager
 
@@ -38,8 +41,9 @@ def _safe_file_stem(value):
             and not re.fullmatch(r'(CON|PRN|AUX|NUL|(?:COM|LPT)[1-9¹²³])', value.split('.')[0], re.I))
 
 
-def read_manifest(path, require_labels=False):
-    """Resolve a JSON list of explicit pairs, keeping keys in case-id order."""
+def read_manifest(path, require_labels=False, *, context_phases=()):
+    """Resolve CT paths and require labels only for the two annotated phases."""
+    phases = PHASES + validate_context_phases(context_phases)
     path = Path(path).resolve()
     entries = _load_json(path)
     if not isinstance(entries, list) or not entries:
@@ -57,14 +61,14 @@ def read_manifest(path, require_labels=False):
             raise ValueError(f'{case_id}: patient_id must be a nonempty string without surrounding whitespace.')
         case_ids.add(case_id.casefold())
         record = {'case_id': case_id, 'patient_id': patient_id}
-        for phase in PHASES:
+        for phase in phases:
             phase_entry = entry.get(phase)
             if not isinstance(phase_entry, dict):
                 raise ValueError(f'{case_id} {phase}: missing phase object.')
             record[phase] = {}
             for role in ('image', 'label'):
                 value = phase_entry.get(role)
-                required = role == 'image' or require_labels
+                required = role == 'image' or (require_labels and phase in PHASES)
                 if value is None and not required:
                     continue
                 if not isinstance(value, str) or not value.strip():
@@ -110,9 +114,11 @@ def validate_split(splits, records, fold):
 
 def _source_paths(records):
     for case_id, record in records.items():
-        for phase in PHASES:
-            for role in ('image', 'label'):
-                yield case_id, phase, role, Path(record[phase][role])
+        for phase, files in record.items():
+            if phase in ('case_id', 'patient_id'):
+                continue
+            for role, path in files.items():
+                yield case_id, phase, role, Path(path)
 
 
 def _file_stat(stat):
@@ -265,21 +271,22 @@ def _class_locations(seg, label_manager):
 
 def _preprocess_case(record, plans_manager, config, label_manager):
     case_id = record['case_id']
-    images = [_read_volume(record[phase]['image'], f'{case_id} {phase}', 'image') for phase in PHASES]
+    phases = PHASES + planned_context_phases(config)
+    images = [_read_volume(record[phase]['image'], f'{case_id} {phase}', 'image') for phase in phases]
     reference = images[0]
     common_geometry = _geometry(reference)
-    data = np.empty((len(PHASES), *reference.GetSize()[::-1]), dtype=np.float32)
+    data = np.empty((len(phases), *reference.GetSize()[::-1]), dtype=np.float32)
     for index, image in enumerate(images):
         aligned = _resample_to_grid(image, reference, sitk.sitkLinear)
         data[index] = sitk.GetArrayViewFromImage(aligned)
 
-    # Determine the crop from the two images before looking at either label.
+    # Use a common crop for all configured images before reading labels.
     union = create_nonzero_mask(data)
     if not union.any():
-        raise ValueError(f'{case_id} {"/".join(PHASES)}: images have an empty common-grid intensity support.')
+        raise ValueError(f'{case_id} {"/".join(phases)}: images have an empty common-grid intensity support.')
     crop = bounding_box_to_slice(get_bbox_from_mask(union))
     del union
-    for phase, image in zip(PHASES, images):
+    for phase, image in zip(phases, images):
         # The coverage mask comes from the source grid, independent of CT voxel values.
         source_fov = sitk.Image(image.GetSize(), sitk.sitkUInt8) + 1
         source_fov.CopyInformation(image)
@@ -296,8 +303,8 @@ def _preprocess_case(record, plans_manager, config, label_manager):
     properties = {
         'case_id': case_id,
         'patient_id': record['patient_id'],
-        'phase_order': list(PHASES),
-        'original_geometries': {phase: _geometry(image) for phase, image in zip(PHASES, images)},
+        'phase_order': list(phases),
+        'original_geometries': {phase: _geometry(image) for phase, image in zip(phases, images)},
         'common_geometry': common_geometry,
         'spacing': original_spacing,
         'shape_before_cropping': tuple(common_geometry['size'][::-1][i] for i in transpose),
@@ -369,17 +376,27 @@ def _estimate_intensities(records, train_cases, label_manager):
                   'percentile_00_5': float(lower), 'percentile_99_5': float(upper)}}
 
 
-def prepare_dataset(manifest_path, splits_path, plans_path, dataset_json_path, output_directory, fold=0):
+def prepare_dataset(manifest_path, splits_path, plans_path, dataset_json_path, output_directory, fold=0,
+                    *, context_phases=None):
     """Prepare one fold and publish its files together in an independent output directory."""
-    records = read_manifest(manifest_path, require_labels=True)
+    plans_manager = PlansManager(_load_json(plans_path))
+    config = plans_manager.get_configuration(CONFIGURATION)
+    if context_phases is not None:
+        context_phases = validate_context_phases(context_phases)
+        architecture = deepcopy(config.configuration['architecture'])
+        architecture['arch_kwargs'].setdefault('tam', {})['context_phases'] = list(context_phases)
+        plans_manager.plans['configurations'][CONFIGURATION]['architecture'] = architecture
+        # PlansManager caches resolved configurations. Rebuild it with the frozen context settings.
+        plans_manager = PlansManager(plans_manager.plans)
+        config = plans_manager.get_configuration(CONFIGURATION)
+    context_phases = planned_context_phases(config)
+    records = read_manifest(manifest_path, require_labels=True, context_phases=context_phases)
     split = validate_split(_load_json(splits_path), records, fold)
     case_ids = {case_id.casefold(): case_id for case_id in records}
     for case_id in records:
         if other := case_ids.get(f'{case_id.casefold()}_seg'):
             raise ValueError(f'Case IDs {case_id!r} and {other!r} produce the same NumPy filename.')
     dataset_json = _load_json(dataset_json_path)
-    plans_manager = PlansManager(_load_json(plans_path))
-    config = plans_manager.get_configuration(CONFIGURATION)
     validate_plans(plans_manager, config, dataset_json)
     label_manager = _label_manager(plans_manager, dataset_json)
     if not _safe_file_stem(config.data_identifier):
@@ -412,7 +429,7 @@ def prepare_dataset(manifest_path, splits_path, plans_path, dataset_json_path, o
         _validate_sources(records, sources, require_same_stat=True)
         fingerprint = {
             'fold': fold,
-            'phase_order': list(PHASES),
+            'phase_order': list(PHASES + context_phases),
             'source_files': sources,
             'foreground_intensity_properties_per_channel': stats,
             'spacings': spacings,

@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from shutil import copyfile
 
 import numpy as np
 import pytest
@@ -172,6 +173,65 @@ def test_real_paired_entrypoints_train_resume_validate_and_predict(paired_experi
     assert sorted(path.name for path in output.glob("*.nii.gz")) == [
         f"case{index}_{phase}.nii.gz" for index in range(3) for phase in ("phase1", "phase5")
     ]
+
+
+def test_sparse_tam_trains_with_two_masks_and_exports_all_ten_phases(paired_experiment, tmp_path):
+    manifest, splits, plans, dataset = paired_experiment
+    context_phases = [f"phase{index}" for index in (2, 3, 4, 6, 7, 8, 9, 10)]
+    entries = json.loads(Path(manifest).read_text(encoding="utf-8"))
+    for record in entries:
+        for phase in context_phases:
+            filename = f"{record['case_id']}_{phase}_image.nii.gz"
+            anchor = tmp_path / record["phase1"]["image"]
+            if phase == "phase7":
+                image = sitk.ReadImage(str(anchor))
+                image.SetDirection((-1, 0, 0, 0, 1, 0, 0, 0, 1))
+                image.SetOrigin((9, 0, 0))
+                write_image(image, tmp_path / filename)
+            else:
+                copyfile(anchor, tmp_path / filename)
+            record[phase] = {"image": filename}
+    write_json(Path(manifest), entries)
+    prepared = tmp_path / "sparse"
+    main(["prepare", manifest, splits, plans, dataset, str(prepared), "--context-phases", *context_phases])
+    with np.load(prepared / "Reference_3d_fullres" / "case0.npz") as cached:
+        assert cached["data"].shape[0] == 10
+        assert cached["seg"].shape[0] == 2
+
+    from nnunetv2.training.nnUNetTrainer.nnUNetTrainerTAM import nnUNetTrainerTAMC5
+    model = tmp_path / "sparse_model"
+    trainer = nnUNetTrainerTAMC5.from_prepared(prepared, model, 0, torch.device("cpu"))
+    trainer.initialize()
+    train_loader, _ = trainer.get_dataloaders()
+    batch = next(train_loader)
+    assert batch["data"].shape[1:3] == (3, 1)
+    assert all(target.shape[1] == 2 for target in batch["target"])
+    inputs = batch["data"].requires_grad_()
+    logits = trainer.network(inputs)
+    assert logits[0].shape[1] == 3
+    logits[0].retain_grad()
+    trainer.loss(logits, batch["target"]).backward()
+    # The context image affects the supervised predictions without its own segmentation loss.
+    assert torch.count_nonzero(inputs.grad[:, 2]) > 0
+    assert torch.count_nonzero(logits[0].grad[:, 2]) == 0
+    main(["train", str(prepared), str(model), "--preset", "C5", "--device", "cpu",
+          "--epochs", "1", "--train-iterations", "1", "--val-iterations", "1"])
+    validation = model / "fold_0" / "validation"
+    summary = json.loads((validation / "summary.json").read_text(encoding="utf-8"))
+    assert {row["phase"] for row in summary["per_case"]} == {"phase1", "phase5"}
+
+    test_case = entries[2]
+    for phase in ("phase1", "phase5"):
+        test_case[phase].pop("label")
+    prediction_manifest = write_json(tmp_path / "image_only.json", [test_case])
+    output = tmp_path / "sparse_predictions"
+    main(["predict", str(model), prediction_manifest, str(output), "--device", "cpu"])
+    assert {path.name for path in output.glob("*.nii.gz")} == {
+        f"case2_phase{index}.nii.gz" for index in range(1, 11)
+    }
+    predicted = sitk.ReadImage(str(output / "case2_phase7.nii.gz"))
+    source = sitk.ReadImage(str(tmp_path / test_case["phase7"]["image"]))
+    assert predicted.IsSameImageGeometryAs(source)
 
 
 def test_ablation_uses_one_recipe_and_reports_paired_patient_differences(paired_experiment, tmp_path):

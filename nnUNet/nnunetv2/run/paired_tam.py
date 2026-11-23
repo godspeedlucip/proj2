@@ -1,4 +1,4 @@
-"""Prepare, train, and predict paired phase1/phase5 CT cases."""
+"""Prepare, train, and predict sparse-label CT sequences with TAM."""
 import argparse
 import json
 import os
@@ -13,7 +13,7 @@ from nnunetv2.evaluation.paired_tam import evaluate_pairs, paired_patient_deltas
 from nnunetv2.inference.paired_tam import PairedTAMPredictor, check_prediction_destinations
 from nnunetv2.preprocessing.paired_tam import prepare_dataset, read_manifest, validate_sources, validate_split
 from nnunetv2.training.nnUNetTrainer import nnUNetTrainerTAM as trainers
-from nnunetv2.utilities.paired_tam_contract import PHASES, TRAINER_PRESETS, json_digest
+from nnunetv2.utilities.paired_tam_contract import CONTEXT_PHASES, PHASES, TRAINER_PRESETS, json_digest
 
 
 TRAINERS = {preset: getattr(trainers, name) for name, preset in TRAINER_PRESETS.items()}
@@ -191,7 +191,8 @@ def ablate(args):
 
 
 def evaluate(args, predictor):
-    records = read_manifest(args.prepared / "paired_manifest.json", require_labels=True)
+    records = read_manifest(args.prepared / "paired_manifest.json", require_labels=True,
+                            context_phases=predictor.context_phases)
     split = validate_split(trainers.read_json(args.prepared / "splits_final.json"), records, args.fold)
     fingerprint = trainers.read_json(args.prepared / "dataset_fingerprint.json")
     validate_sources(records, fingerprint)
@@ -254,6 +255,8 @@ def main(argv=None):
     prep = commands.add_parser("prepare", help="Freeze CT statistics and preprocess one patient fold.")
     for name in ("manifest", "splits", "plans", "dataset_json", "output"):
         prep.add_argument(name, type=Path)
+    prep.add_argument("--context-phases", choices=CONTEXT_PHASES, nargs="+",
+                      help="Image-only phases to rotate through the third input slot.")
     add_fold(prep)
 
     training = commands.add_parser("train", help="Train and validate a paired TAM preset.")
@@ -267,7 +270,7 @@ def main(argv=None):
     ablation.add_argument("output", type=Path)
     add_training_options(ablation, seed=12345)
 
-    predict = commands.add_parser("predict", help="Export two native-grid predictions per manifest case.")
+    predict = commands.add_parser("predict", help="Export native-grid predictions for all configured phases.")
     for name in ("model", "manifest", "output"):
         predict.add_argument(name, type=Path)
     add_inference_options(predict)
@@ -296,7 +299,8 @@ def main(argv=None):
     if args.command == "reference-dataset":
         stage_reference_dataset(args)
     elif args.command == "prepare":
-        prepare_dataset(args.manifest, args.splits, args.plans, args.dataset_json, args.output, args.fold)
+        prepare_dataset(args.manifest, args.splits, args.plans, args.dataset_json, args.output, args.fold,
+                        context_phases=args.context_phases)
     elif args.command == "train":
         train(args)
     elif args.command == "ablate":
@@ -310,9 +314,10 @@ def main(argv=None):
         if args.command == "evaluate":
             evaluate(args, predictor)
         else:
-            records = read_manifest(args.manifest)
+            records = read_manifest(args.manifest, context_phases=predictor.context_phases)
             check_prediction_destinations(records, records.values(), args.output,
-                                          predictor.dataset_json["file_ending"], args.save_probabilities)
+                                          predictor.dataset_json["file_ending"], args.save_probabilities,
+                                          phases=predictor.phase_order)
             for record in records.values():
                 predictor.predict_case(record, args.output, args.save_probabilities)
 

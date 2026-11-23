@@ -6,7 +6,7 @@
 
 论文在二维 CAMUS 上将 C5 定义为在 `E3 + E4 + E5` 插入 TAM。本文按论文算法 1 将三个模块接入编码阶段输出，并迁移到三维 CT。阶段通道、空间卷积核和步长来自本项目的 nnU-Net plans。第一轮用 C1、C3、C4、C5 比较插入位置。训练和推理的验收范围为单卡 `3d_fullres`、单通道 CT 和互斥类别掩膜。[TAM 论文图 2、表 1、算法 1 和算法 2](https://doi.org/10.1016/j.media.2026.103981)
 
-`phase1` 和 `phase5` 沿用数据中的时相标识。首轮实验的输出和性能结论覆盖这两期。若后续要预测另外八期，单独扩展到带时相监督掩码的多帧训练，并补充其他时相的人工验证标签。
+`phase1` 和 `phase5` 沿用数据中的时相标识。首轮以 `T=2` 复现论文表 1 对输入帧数的控制，输出和性能结论覆盖这两期。第 2.5 节定义如何加入另外八期的真实图像并生成对应分割。
 
 ## 2. 数据与预处理
 
@@ -41,8 +41,18 @@
 
 1. 用正式训练的精度、深监督配置和两期输入，对 C5 做完整训练步的显存预试，覆盖前向、反向和优化器状态分配。显存不足时，先尝试减小所有对照共用的成对 batch size，再考虑缩小空间 patch，以尽量保留每个 patch 覆盖的物理视野。
 2. 如需缩小 patch，维持参考 plans 的目标间距和主干拓扑，确保各轴尺寸可被该轴累计下采样步长整除，并检查最深层和解码跳接的形状。用 C1、C3、C4、C5 各验证一次候选设置下的训练和滑窗推理，再锁定 `patch_size`、`batch_size`、间距和编码器步长。四组用相同的成对样本数定义 batch。
-3. 训练以定稿 plans 为唯一来源。增强开始时可使用内部派生的 `initial_patch_size` 来容纳旋转，增强后的模型输入统一裁回 `patch_size`。整卷验证和独立推理使用同一尺寸作为滑窗 tile，并固定滑窗步进和镜像策略。[nnU-Net 训练裁剪设置](../../../nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py#L427) · [nnU-Net 滑窗设置](../../../nnunetv2/inference/predict_from_raw_data.py#L506)
+3. 训练以定稿 plans 为唯一来源。增强开始时可使用内部派生的 `initial_patch_size` 来容纳旋转，增强后的模型输入统一裁回 `patch_size`。整卷验证和独立推理使用同一尺寸作为滑窗 tile，并固定滑窗步进和镜像策略。[nnU-Net 训练裁剪设置](../../../nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py#L434) · [nnU-Net 滑窗设置](../../../nnunetv2/inference/predict_from_raw_data.py#L506)
 4. 保存定稿 plans 的标识和副本，并在启动、恢复和预测时核对实际 patch、间距及主干步长。使用一个预先固定的训练、验证、测试划分时，所有重复实验复用同一份 plans。若严格交叉验证给每折用该折训练患者独立规划，允许折间 patch 不同，四个配置在**同一折内**必须共用 plans，结果先按折配对比较再汇总。正式实验中若必须改 patch 或 batch，生成新版本并用新设置重跑该组四个配置。
+
+### 2.5 用两期标注训练其他时相的分割
+
+保留 `T=2` 作为插入位置对照。单独定义三期稀疏监督配置，固定输入顺序为 `[phase1, phase5, query_phase]`。每次从同一采集的另外八期中选一个 `query_phase`，用该期的真实 CT 与两期参考 CT 在共同网格取同位置 patch。训练采样覆盖全部八个目标时相。网络对三期都产生 logits，损失仍由 `phase1` 和 `phase5` 两期等权平均。数据以时相标识关联已有标签，`query_phase` 只读图像。由于跨帧注意力参与计算，两个有监督输出的损失也可以经由目标时相特征更新模型参数。
+
+预测某一期时用同一个三期模型输入 `[phase1, phase5, 该期]`，导出第三个输出。遍历八个目标时相即可得到八份分割。需要同一 checkpoint 产生全部十期结果时，预先固定一组（例如以 `phase3` 为目标的组合）并从该组保留 `phase1` 和 `phase5` 的预测。各期都在各自原始网格导出。推理输入均为 CT 图像。
+
+在 `prepare` 中用 `--context-phases` 将目标时相列表写入预处理 plans。预处理、模型输入校验、标签索引、checkpoint 和滑窗导出均使用这份配置，三期模式单独训练。对比 `T=2` 和 `T=3` 时共用可运行的 patch、间距、划分和训练预算。额外时相的分割精度用独立人工掩膜验证。每个 TAM 的有序帧对数为 `T×(T−1)`，所以扩展模式用三期一组，逐一覆盖另外八个时相。[运行步骤](../../../documentation/paired_tam_ablation.md)
+
+论文表 2 给出了多帧输入、仅 ED 和 ES 参与损失的稀疏监督设置。作者 GitHub 的默认 Notebook 则加载 ED、ES 和三个中间帧的图像与掩膜，对所有加载帧累加损失。公开 Notebook 用二维 FCN8s，在瓶颈执行一次 TAM。三期稀疏监督的损失按论文设置实现，三维编码阶段的插入位置按论文 C5 实现。[TAM 论文表 1、表 2](https://doi.org/10.1016/j.media.2026.103981) · [作者的 FCN8s Notebook](https://github.com/kamruleee51/TAM/blob/main/codes/TAM_FCN8s.ipynb) · [作者的数据加载器](https://github.com/kamruleee51/TAM/blob/main/codes/data_loader.py)
 
 ## 3. C5 编码器和 TAM3D
 
@@ -76,10 +86,10 @@
 
 | 接入点 | 约定 |
 |---|---|
-| [`nnUNetTrainer.build_network_architecture`](../../../nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py#L304) | 在独立 trainer 变体中从 plans 构建空间主干和 TAM。使用可由当前仓库发现的 trainer 类名确定 C1/C3/C4/C5 预设。checkpoint 记录实际 stage 位置、头数、嵌入宽度及固定时相顺序，恢复时核对配置。 |
-| [默认预处理器](../../../nnunetv2/preprocessing/preprocessors/default_preprocessor.py#L45) 和 [`get_dataloaders`](../../../nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py#L623) | 复用 plans、读写器和归一化与重采样操作，新增成对数据入口和共同裁剪。数据集按病例加载两期体积，增强后明确拆分时相和通道。 |
-| [`_build_loss`](../../../nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py#L391)、[`train_step`](../../../nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py#L973) 和 [`validation_step`](../../../nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py#L1020) | 按时相从全部监督尺度取出对应的 logits 和 target。每期分别计算现有 Dice + CE 及其深监督损失，再对两期损失取算术平均。启用 `batch_dice` 时，每期独立汇总各病例的交并统计。在线验证继续产生基础 trainer 所需的损失及前景统计，同时记录分时相指标。 |
-| [`perform_actual_validation`](../../../nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py#L1212) 和 [滑窗预测](../../../nnunetv2/inference/predict_from_raw_data.py#L506) | 成对验证使用同一个独立的成对预测入口。复用现有滑窗位置计算和高斯加权函数，由成对预测器维护 `[T,K,D,H,W]` 的累积缓冲区。默认单掩膜预测器按 `[K,D,H,W]` 分配输出，因此 trainer 的整卷验证和成对推理都接到专用入口。 |
+| [`nnUNetTrainer.build_network_architecture`](../../../nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py#L311) | 在独立 trainer 变体中从 plans 构建空间主干和 TAM。使用可由当前仓库发现的 trainer 类名确定 C1/C3/C4/C5 预设。checkpoint 记录实际 stage 位置、头数、嵌入宽度及固定时相顺序，恢复时核对配置。 |
+| [默认预处理器](../../../nnunetv2/preprocessing/preprocessors/default_preprocessor.py#L45) 和 [`get_dataloaders`](../../../nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py#L630) | 复用 plans、读写器和归一化与重采样操作，新增成对数据入口和共同裁剪。数据集按病例加载两期体积，增强后明确拆分时相和通道。 |
+| [`_build_loss`](../../../nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py#L398)、[`train_step`](../../../nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py#L980) 和 [`validation_step`](../../../nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py#L1027) | 按时相从全部监督尺度取出对应的 logits 和 target。每期分别计算现有 Dice + CE 及其深监督损失，再对两期损失取算术平均。启用 `batch_dice` 时，每期独立汇总各病例的交并统计。在线验证继续产生基础 trainer 所需的损失及前景统计，同时记录分时相指标。 |
+| [`perform_actual_validation`](../../../nnunetv2/training/nnUNetTrainer/nnUNetTrainer.py#L1225) 和 [滑窗预测](../../../nnunetv2/inference/predict_from_raw_data.py#L506) | 成对验证使用同一个独立的成对预测入口。复用现有滑窗位置计算和高斯加权函数，由成对预测器维护 `[T,K,D,H,W]` 的累积缓冲区。默认单掩膜预测器按 `[K,D,H,W]` 分配输出，因此 trainer 的整卷验证和成对推理都接到专用入口。 |
 | [预测导出](../../../nnunetv2/inference/export_prediction.py#L14) | 每期单独融合滑窗 logits。恢复共同网格的裁剪和轴顺序后，映射到该期原始物理几何，再用 `LabelManager` 生成标签图。输出按 `case_id` 和时相标识命名，每个病例生成两份预测。 |
 
 推理时，同一个滑窗坐标一次读取两期 patch 并一次前向产生两份 logits。若启用镜像测试增强，两期同时翻转相同的空间轴。checkpoint 重载后关闭深监督，预测器使用原生几何中的 phase1、phase5 输出分别评分。

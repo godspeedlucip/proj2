@@ -1,4 +1,4 @@
-"""Sliding-window inference and native-grid export for phase1/phase5 pairs."""
+"""Sliding-window inference for annotated anchors and image-only target phases."""
 
 from contextlib import nullcontext
 from itertools import combinations, product
@@ -18,15 +18,17 @@ from nnunetv2.utilities.paired_tam_contract import (
     TILE_STEP_SIZE,
     TRAINER_PRESETS,
     make_checkpoint_contract,
+    planned_context_phases,
     validate_plans,
 )
 from nnunetv2.utilities.paired_tam_io import write_image
 from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
 
 
-def check_prediction_destinations(case_ids, source_records, output_directory, file_ending, save_probabilities=False):
+def check_prediction_destinations(case_ids, source_records, output_directory, file_ending,
+                                  save_probabilities=False, *, phases=PHASES):
     sources = {
-        Path(path).resolve() for record in source_records for phase in PHASES
+        Path(path).resolve() for record in source_records for phase in phases
         for path in record[phase].values()
     }
     source_files = set()
@@ -37,7 +39,7 @@ def check_prediction_destinations(case_ids, source_records, output_directory, fi
     suffixes = (file_ending, ".npz", ".pkl") if save_probabilities else (file_ending,)
     output_directory = Path(output_directory)
     for case_id in case_ids:
-        for phase in PHASES:
+        for phase in phases:
             for suffix in suffixes:
                 destination = output_directory / f"{case_id}_{phase}{suffix}"
                 if destination.resolve() in sources or destination.is_symlink():
@@ -90,6 +92,9 @@ class PairedTAMPredictor:
         self.checkpoint_metadata = None
         self.device = torch.device(device)
         self.patch_size = tuple(configuration_manager.patch_size)
+        self.context_phases = planned_context_phases(configuration_manager)
+        self.phase_order = PHASES + self.context_phases
+        self.input_phase_count = len(PHASES) + bool(self.context_phases)
         self.tile_step_size = tile_step_size
         self.label_manager = plans_manager.get_label_manager(dataset_json)
         if self.label_manager.has_regions:
@@ -150,7 +155,7 @@ class PairedTAMPredictor:
 
     def _predict_tile(self, tile):
         prediction = self.network(tile)
-        expected_shape = (1, len(PHASES), self.label_manager.num_segmentation_heads, *self.patch_size)
+        expected_shape = (1, self.input_phase_count, self.label_manager.num_segmentation_heads, *self.patch_size)
         if not isinstance(prediction, torch.Tensor) or prediction.shape != expected_shape:
             raise ValueError(f'Paired TAM prediction requires a single output tensor with shape {expected_shape}. '
                              'Disable deep supervision before inference.')
@@ -163,8 +168,8 @@ class PairedTAMPredictor:
     @torch.inference_mode()
     def predict_logits(self, data: np.ndarray | torch.Tensor) -> torch.Tensor:
         """Return CPU float32 logits of shape [T, K, D, H, W] in preprocessed space."""
-        if data.ndim != 4 or data.shape[0] != len(PHASES) or min(data.shape[1:]) < 1:
-            raise ValueError(f'Expected data in phase order {PHASES} with shape [T, D, H, W].')
+        if data.ndim != 4 or data.shape[0] != self.input_phase_count or min(data.shape[1:]) < 1:
+            raise ValueError(f'Expected data with {self.input_phase_count} phases and shape [T, D, H, W].')
         data = torch.as_tensor(data, device='cpu', dtype=torch.float32)
         data, undo_padding = pad_nd_image(data, self.patch_size, 'constant', {'value': 0}, True)
         spatial_shape = data.shape[1:]
@@ -172,7 +177,7 @@ class PairedTAMPredictor:
 
         # Full-volume buffers stay on the CPU so GPU memory scales with the plans tile size.
         gaussian = compute_gaussian(self.patch_size, dtype=torch.float32, device=torch.device('cpu'))
-        logits = torch.zeros((len(PHASES), self.label_manager.num_segmentation_heads, *spatial_shape),
+        logits = torch.zeros((self.input_phase_count, self.label_manager.num_segmentation_heads, *spatial_shape),
                              dtype=torch.float32, device='cpu')
         weights = torch.zeros(spatial_shape, dtype=torch.float32, device='cpu')
         self.network.to(self.device).eval()
@@ -194,18 +199,31 @@ class PairedTAMPredictor:
         from nnunetv2.preprocessing.paired_tam import preprocess_case
 
         check_prediction_destinations([record["case_id"]], [record], output_directory,
-                                      self.dataset_json["file_ending"], save_probabilities)
+                                      self.dataset_json["file_ending"], save_probabilities, phases=self.phase_order)
         data, _, properties = preprocess_case(record, self.plans_manager, self.configuration_manager,
                                               self.dataset_json, with_labels=False)
-        logits = self.predict_logits(data)
-        return self.export_prediction(logits, properties, record['case_id'], output_directory, save_probabilities)
+        if not self.context_phases:
+            return self.export_prediction(self.predict_logits(data), properties, record['case_id'],
+                                          output_directory, save_probabilities)
+
+        paths = {}
+        for index, phase in enumerate(self.context_phases):
+            # Keep the anchor predictions from the first triplet, and each target from its own triplet.
+            group = PHASES + (phase,)
+            first_output = 0 if index == 0 else len(PHASES)
+            logits = self.predict_logits(data[[*range(len(PHASES)), len(PHASES) + index]])
+            paths.update(self.export_prediction(logits[first_output:], properties, record['case_id'],
+                                                output_directory, save_probabilities, phases=group[first_output:]))
+        return paths
 
     def export_prediction(self, logits: np.ndarray | torch.Tensor, properties: dict, case_id: str,
-                          output_directory: str | Path, save_probabilities: bool = False) -> dict[str, str]:
+                          output_directory: str | Path, save_probabilities: bool = False, *,
+                          phases=None) -> dict[str, str]:
         """Restore physical grids before converting scores to labels or probabilities."""
-        if tuple(properties['phase_order']) != PHASES:
-            raise ValueError(f'Case {case_id}: expected prediction phase order {PHASES}.')
-        if logits.ndim != 5 or logits.shape[:2] != (len(PHASES), self.label_manager.num_segmentation_heads):
+        if tuple(properties['phase_order']) != self.phase_order:
+            raise ValueError(f'Case {case_id}: expected prediction phase order {self.phase_order}.')
+        phases = self.phase_order if phases is None else phases
+        if logits.ndim != 5 or logits.shape[:2] != (len(phases), self.label_manager.num_segmentation_heads):
             raise ValueError(f'Case {case_id}: expected logits with shape [T, K, D, H, W].')
         if isinstance(logits, torch.Tensor):
             logits = logits.detach().cpu().float().numpy()
@@ -221,7 +239,7 @@ class PairedTAMPredictor:
         destination = Path(output_directory)
         destination.mkdir(parents=True, exist_ok=True)
         paths = {}
-        for phase, phase_logits in zip(PHASES, logits):
+        for phase, phase_logits in zip(phases, logits):
             cropped = self.configuration_manager.resampling_fn_probabilities(
                 phase_logits, crop_shape, self.configuration_manager.spacing, spacing,
             )

@@ -164,6 +164,9 @@ class nnUNetDataLoader(DataLoader):
 
         return bbox_lbs, bbox_ubs
 
+    def _crop_data(self, data, bbox):
+        return crop_and_pad_nd(data, bbox, 0)
+
     def generate_train_batch(self):
         selected_keys = self.get_indices()
         # preallocate memory for data and seg
@@ -185,7 +188,7 @@ class nnUNetDataLoader(DataLoader):
             bbox = [[i, j] for i, j in zip(bbox_lbs, bbox_ubs)]
 
             # use ACVL utils for that. Cleaner.
-            data_all[j] = crop_and_pad_nd(data, bbox, 0)
+            data_all[j] = self._crop_data(data, bbox)
 
             seg_cropped = crop_and_pad_nd(seg, bbox, -1)
             if seg_prev is not None:
