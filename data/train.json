@@ -1,0 +1,28 @@
+{
+  "scans": [
+    {
+      "patient_id": "Control_1_7569",
+      "scan_id": "Control_1_7569_Heart_with_contrast_back",
+      "domain": "local_pig_simulation",
+      "split": "train",
+      "projections": "../../../uniform_20_cycles/outputs/recon/Control_1_7569/Heart_with_contrast_back/projections.npy",
+      "views": "../../../uniform_20_cycles/settings/projection_phase_mapping.csv",
+      "n_phases": 10,
+      "phase_base": 1,
+      "geometry": {
+        "DSO_mm": 750.0,
+        "DSD_mm": 1250.0,
+        "nDetector_vu": [474, 648],
+        "dDetector_vu_mm": [0.616, 0.616],
+        "offDetector_vu_mm": [0.0, 0.0]
+      },
+      "grid": {
+        "shape_zyx": [640, 256, 256],
+        "spacing_xyz_mm": [0.91640625, 0.91640625, 0.25],
+        "origin_xyz_mm": [-116.841796875, -116.841796875, -79.875],
+        "direction_xyz": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+      },
+      "fdk": {"padding_vu": [100, 100]}
+    }
+  ]
+}

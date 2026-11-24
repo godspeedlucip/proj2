@@ -1,0 +1,7 @@
+numpy
+torch>=2.3
+PyYAML
+tensorboard
+Pillow
+scipy
+nibabel
