@@ -33,6 +33,32 @@ def parser():
     d.add_argument('--split'); d.add_argument('--split-name',choices=['train','val','test','all'],default='test'); d.add_argument('--mode',choices=['full','tiled'],default='tiled')
     d.add_argument('--tile',nargs=3,type=int,default=[32,128,128]); d.add_argument('--overlap',nargs=3,type=int,default=[16,64,64]); d.add_argument('--device',default='cuda'); d.add_argument('--fp32',action='store_true'); d.add_argument('--export',nargs='+',choices=['h5','tif','nii'],default=['h5'])
     d=sub.add_parser('evaluate'); d.add_argument('--predictions',required=True); d.add_argument('--manifest',required=True); d.add_argument('--metric-config'); d.add_argument('--projection',action='store_true'); d.add_argument('--out',required=True)
+    for command in ('prepare-moco','train-register','infer-moco'):
+        d=sub.add_parser(command)
+        d.add_argument('--config')
+        d.add_argument('--manifest')
+        d.add_argument('--out',required=True)
+        d.add_argument('--device',choices=['cpu','cuda'])
+        d.add_argument('--dry-run',action='store_true',help='Validate and export effective YAML')
+        if command in ('train-register','infer-moco'):
+            baseline=d.add_mutually_exclusive_group()
+            baseline.add_argument('--baseline',help='Frozen Stage II prediction manifest')
+            baseline.add_argument('--baseline-checkpoint',help='Versioned official_v1 Stage II checkpoint')
+        if command=='train-register':
+            d.add_argument('--val-manifest'); d.add_argument('--val-baseline'); d.add_argument('--resume')
+            d.add_argument('--stop-after-epoch',type=int)
+        else:
+            d.add_argument('--split-name',choices=['all','val','test'],default='all')
+            d.add_argument('--test-lock')
+        if command=='prepare-moco':
+            d.add_argument('--raw-manifest'); d.add_argument('--external-c')
+        if command=='infer-moco':
+            d.add_argument('--correction'); d.add_argument('--register-checkpoint'); d.add_argument('--field-cache')
+    d=sub.add_parser('split-moco'); d.add_argument('--manifest',required=True); d.add_argument('--scan-split',required=True); d.add_argument('--out',required=True)
+    d=sub.add_parser('evaluate-moco'); d.add_argument('--predictions',action='append',required=True,metavar='NAME=MANIFEST')
+    d.add_argument('--manifest',required=True); d.add_argument('--metric-config'); d.add_argument('--out',required=True)
+    d.add_argument('--split-name',choices=['all','val','test'],default='all'); d.add_argument('--test-lock')
+    d=sub.add_parser('lock-moco'); d.add_argument('--validation',required=True); d.add_argument('--out',required=True)
     d=sub.add_parser('benchmark'); d.add_argument('--config'); d.add_argument('--stage',type=int,choices=[1,2],default=2); d.add_argument('--phase-count',type=int,default=11); d.add_argument('--steps',type=int,default=2); d.add_argument('--weights'); d.add_argument('--out')
     return p
 
@@ -162,6 +188,9 @@ def dispatch(args):
         cfg=load_config(args.metric_config,'metrics')
         if args.projection: cfg['projection']=True
         return evaluate_predictions(args.predictions,args.manifest,cfg,args.out)
+    if command in ('prepare-moco','train-register','infer-moco','split-moco','evaluate-moco','lock-moco'):
+        from .moco.cli import run_moco
+        return run_moco(args)
     if command=='benchmark':
         result=benchmark(load_config(args.config),args.stage,args.phase_count,args.steps,args.weights)
         if args.out: atomic_json(args.out,result)

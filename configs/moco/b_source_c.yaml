@@ -1,0 +1,3 @@
+fusion: {source: c}
+pigae: {mode: static_consistent}
+outputs: [d]

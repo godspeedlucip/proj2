@@ -437,6 +437,7 @@ def reconstruct_prior(
     fov_output_transverse_pixels: int = FOV_OUTPUT_TRANSVERSE_PIXELS,
     fov_source_pixels: int = 0,
     fov_mask_diameter_shrink_pixels: int = FOV_MASK_DIAMETER_SHRINK_PIXELS,
+    use_view_geometry: bool = False,
 ) -> tuple[np.ndarray, tuple[float, float, float]]:
     """Run FDK, optionally directly on a wider fixed-size transverse grid."""
     if tuple(projections.shape[1:]) != tuple(int(v) for v in geometry.nDetector):
@@ -488,11 +489,18 @@ def reconstruct_prior(
         dsd=float(geometry.DSD),
         mode=getattr(geometry, "mode", "cone"),
     )
-    reconstruction = TigreTool.reconstruct_tigre(
-        projections=padded,
-        geometry=fov_geometry,
-        angles=angles,
-    )
+    if use_view_geometry:
+        from tigre.algorithms import fdk
+        for name in ("offDetector", "rotDetector", "COR"):
+            if hasattr(geometry, name):
+                setattr(fov_geometry, name, getattr(geometry, name))
+        reconstruction = fdk(padded, fov_geometry, angles, filter="ram_lak", dowang=False)
+    else:
+        reconstruction = TigreTool.reconstruct_tigre(
+            projections=padded,
+            geometry=fov_geometry,
+            angles=angles,
+        )
 
     nz, ny, nx = reconstruction.shape
     z_mm = (np.arange(nz, dtype=np.float64) - (nz - 1) / 2) * float(fov_geometry.dVoxel[0])

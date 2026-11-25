@@ -64,9 +64,14 @@ def validate_train(cfg):
 
 
 def load_config(path=None,kind='train'):
-    defaults={'train':train_defaults,'simulation':simulation_defaults,'metrics':metric_defaults}[kind]()
-    data={} if path is None else yaml.safe_load(Path(path).read_text(encoding='utf-8-sig')) or {}
+    from .moco.settings import defaults as moco_defaults, validate as validate_moco
+    defaults={'train':train_defaults,'simulation':simulation_defaults,'metrics':metric_defaults,'moco':moco_defaults}[kind]()
+    data=None if path is None else yaml.safe_load(Path(path).read_text(encoding='utf-8-sig'))
+    if data is None: data={}
+    if not isinstance(data,dict): raise ValueError('Configuration must be a mapping')
     cfg=merge_strict(defaults,data)
+    if kind=='moco':
+        return validate_moco(cfg, Path(path).resolve().parent if path else Path.cwd())
     if path:
         base=Path(path).resolve().parent
         for key in ['settings_root','settings_csv','cycle_csv','init_weights']:

@@ -27,11 +27,11 @@ def preview(path,cbct,prediction,target,window=(0.,.05)):
     canvas.save(path)
 
 
-def predict_manifest(checkpoint,manifest,out,split_name='test',mode='tiled',tile=(32,128,128),overlap=(16,64,64),device='cuda',amp=True,export=('h5',),split=None):
+def predict_manifest(checkpoint,manifest,out,split_name='test',mode='tiled',tile=(32,128,128),overlap=(16,64,64),device='cuda',amp=True,export=('h5',),split=None,*,preview_reference=True, input_only=False):
     ck=load_checkpoint(checkpoint,require_training=False); dev=select_device(device)
     if not all(k in ck for k in ['stage','model_profile','normalization','intensity_domain']): raise ValueError('Checkpoint lacks inference contracts')
     model=create_model(ck['stage'],ck['model_profile']).to(dev); model.load_state_dict(ck['state_dict'],strict=True)
-    rows=validate_manifest(manifest,require_target=False)
+    rows=validate_manifest(manifest,require_target=False,full=not input_only,verify_projections=not input_only)
     if split_name!='all':
         selected_split=validate_split(rows,split or ck.get('split',{}))
         rows=[r for r in rows if str(r['animal_id']) in selected_split[split_name]]
@@ -49,12 +49,14 @@ def predict_manifest(checkpoint,manifest,out,split_name='test',mode='tiled',tile
         with h5py.File(row['path'],'r') as f:
             predicted=predict_volume(model,f['cbct'],f['prior'],ck['normalization'],mode,tile,overlap,dev,amp)
             output_meta={**meta,'inference':{'mode':mode,'tile':list(tile),'overlap':list(overlap),'stage':ck['stage'],
+                'amp':bool(amp and dev.type=='cuda'),'device':str(dev),
                 'model_profile':ck['model_profile'],'checkpoint_sha256':checkpoint_sha,'source_sha256':row['sha256']}}
             with h5py.File(temp,'w') as dest:
                 dest.create_dataset('prediction',data=predicted,chunks=(1,min(predicted.shape[1],16),min(predicted.shape[2],128),min(predicted.shape[3],128)),compression='gzip',compression_opts=1)
                 dest.attrs['metadata_json']=json.dumps(output_meta,ensure_ascii=False)
             os.replace(temp,path)
-            preview(folder/'comparison.png',f['cbct'],predicted,f.get('target'))
+            if preview_reference:
+                preview(folder/'comparison.png',f['cbct'],predicted,f.get('target'))
             for ti,label in enumerate(meta['phase_labels']):
                 if 'tif' in export: tifffile.imwrite(folder/f'phase_{label:02d}_prediction.tif',predicted[ti])
                 if 'nii' in export:

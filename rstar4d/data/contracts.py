@@ -133,6 +133,7 @@ def read_manifest(path):
         if not str(row.get('animal_id','')).strip(): raise ValueError('Missing animal_id')
         row['path']=str(resolve(row['path'],path.parent))
         if row.get('projections'): row['projections']=str(resolve(row['projections'],path.parent))
+        if row.get('acquisition'): row['acquisition']=str(resolve(row['acquisition'],path.parent))
     return rows
 
 
@@ -140,8 +141,11 @@ def write_manifest(path,rows):
     path=Path(path).resolve(); output=[]
     for item in rows:
         row=dict(item)
-        for key in ['path','projections']:
-            if row.get(key): row[key]=os.path.relpath(Path(row[key]).resolve(),path.parent).replace('\\','/')
+        for key in ['path','projections','acquisition']:
+            if row.get(key):
+                target=Path(row[key]).resolve()
+                try: row[key]=os.path.relpath(target,path.parent).replace('\\','/')
+                except ValueError: row[key]=target.as_posix()
         output.append(row)
     atomic_jsonl(path,output)
 
@@ -159,13 +163,15 @@ def validate_split(rows,split):
     return {k:[str(v) for v in values] for k,values in split.items()}
 
 
-def validate_manifest(path,split=None,require_target=True,full=True):
+def validate_manifest(path,split=None,require_target=True,full=True,verify_projections=True):
     rows=read_manifest(path)
     for row in rows:
         if not row.get('sha256') or sha256(row['path'])!=row['sha256']: raise ValueError(f'Data hash mismatch: {row["case_id"]}')
         info=validate_case(row['path'],require_target,full)
+        if row.get('source_metadata_hash') and row['source_metadata_hash']!=canonical_hash(info['metadata']):
+            raise ValueError(f'Data metadata hash mismatch: {row["case_id"]}')
         row.update(info)
-        if row.get('projections') and sha256(row['projections'])!=row.get('projections_sha256'):
+        if verify_projections and row.get('projections') and sha256(row['projections'])!=row.get('projections_sha256'):
             raise ValueError('Projection hash mismatch')
     if split is not None: validate_split(rows,split)
     domains={(r['metadata']['intensity_domain'],r['metadata']['calibration_application'],canonical_hash(r['metadata']['normalization'])) for r in rows}

@@ -180,7 +180,7 @@ def simulate_case(row,config,out,backend):
                 settings_source=settings_details,generation_profile=config['profile'],prior_mode=config['prior_mode'],
                 valid_mask_rule='all_interpolation_sources_valid_and_inside_output_fov',
                 full_object_fov=bool(config['full_object_fov'] and fits),full_fov_verified_from_source_support=bool(fits),
-                noise=config['noise'],cycle_sha256=sha256(cycle),cache_key=cache_key,
+                noise=config['noise'],simulation_seed=config['seed'],cycle_sha256=sha256(cycle),cache_key=cache_key,
                 backend=backend,implementation=signature['implementation'])
             f.attrs['metadata_json']=json.dumps(meta,ensure_ascii=False,allow_nan=False)
         validate_case(paired)

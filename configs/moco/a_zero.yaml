@@ -1,0 +1,2 @@
+registration: {mode: zero}
+outputs: [x, d]

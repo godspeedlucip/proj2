@@ -43,18 +43,24 @@ def project(volume,geo,angles,batch=64):
     angles=np.asarray(angles,dtype=np.float32)
     output=np.empty((len(angles),*geo.nDetector),dtype=np.float32)
     for start in range(0,len(angles),batch):
-        output[start:start+batch]=tigre.Ax(volume,copy.deepcopy(geo),angles[start:start+batch],projection_type='Siddon')
+        part=copy.deepcopy(geo)
+        for name,vector_size in [('offDetector',2),('rotDetector',3),('offOrigin',3),('COR',None)]:
+            value=np.asarray(getattr(geo,name,0))
+            if value.shape==((len(angles),vector_size) if vector_size else (len(angles),)):
+                setattr(part,name,value[start:start+batch])
+        output[start:start+batch]=tigre.Ax(volume,part,angles[start:start+batch],projection_type='Siddon')
     if not np.isfinite(output).all(): raise FloatingPointError('Nonfinite TIGRE projections')
     return output
 
 
-def reconstruct(projections,geo,angles,settings):
+def reconstruct(projections,geo,angles,settings,*,use_view_geometry=False):
     require_cuda()
     if len(angles)<2: raise ValueError('FDK requires at least two views')
     output,spacing=reconstruct_prior(np.array(projections,dtype=np.float32,copy=True),copy.deepcopy(geo),
         np.asarray(angles,dtype=np.float32),TigreTool(),padding_row_pixels=settings.padding_row_pixels,
         padding_col_pixels=settings.padding_col_pixels,fov_output_transverse_pixels=settings.fov_output_pixels,
-        fov_source_pixels=settings.fov_source_pixels,fov_mask_diameter_shrink_pixels=settings.fov_mask_shrink_pixels)
+        fov_source_pixels=settings.fov_source_pixels,fov_mask_diameter_shrink_pixels=settings.fov_mask_shrink_pixels,
+        use_view_geometry=use_view_geometry)
     if not np.isfinite(output).all(): raise FloatingPointError('Nonfinite TIGRE reconstruction')
     return output,spacing
 

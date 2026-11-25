@@ -1,0 +1,4 @@
+fusion: {source: c}
+pigae: {mode: static_consistent}
+reinjection: {alpha: 1}
+outputs: [b, d, y_single, y_multi]
