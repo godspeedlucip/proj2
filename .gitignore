@@ -9,3 +9,5 @@ __pycache__/
 /.runtime/
 /tmp/
 /RSTAR4D.pdf
+
+/weights/

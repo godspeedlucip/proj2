@@ -17,3 +17,4 @@ include = ["rstar4d*"]
 
 [tool.setuptools.package-data]
 "rstar4d" = ["provenance.json"]
+"rstar4d.models" = ["SAM-LICENSE.txt"]

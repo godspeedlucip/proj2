@@ -110,3 +110,7 @@ Stage I默认每epoch的draw数为训练病例z层数之和，Stage II为15×病
 不依赖pytest。测试包含公开权重/前向/loss对照、动物泄漏、mask、T10/T11、真实TIGRE、两条入口的完整CLI流程、续训一致性和滑窗/指标。CUDA不可用时仅GPU测试跳过，不能据此声称TIGRE验证通过。本机36项测试通过且无跳过。具体范围见 [实现验收报告](D:/desktop/课题2/proj/RSTAR4D/docs/reviews/2026-11-16-implementation-acceptance.md)。可用 `python -m validation.run_delivery_checks --out runs/my_acceptance` 一次执行并保存两条入口的完整小体模产物。
 
 配置YAML内路径相对YAML所在目录，manifest路径相对manifest所在目录，CLI路径相对当前工作目录。未知配置字段、损坏权重、缺失元数据、非有限值会明确失败。
+
+## Stage II STAM
+
+[RTX A6000 训练命令、实验配置与验收记录](docs/stam-training.md)

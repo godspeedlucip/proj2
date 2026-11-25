@@ -1,6 +1,8 @@
 from __future__ import annotations
 from collections import defaultdict
 import csv
+import json
+import time
 from pathlib import Path
 import h5py
 import numpy as np
@@ -37,12 +39,20 @@ def projection_summary(cases):
     return result
 
 
-def evaluate_predictions(predictions,manifest,config,out):
+def evaluate_predictions(predictions, manifest, config, out, lv_annotations=None, lv_extractor=None, lv_device='cpu'):
+    if lv_extractor and not lv_annotations:
+        raise ValueError('An LV extractor requires trusted LV annotations')
+    if lv_annotations:
+        from .lv_metrics import evaluate_lv, load_annotations, load_extractor, summarize_lv
     predictions=Path(predictions).resolve()
     pred_manifest=predictions/'manifest.jsonl' if predictions.is_dir() else predictions
     sources={r['case_id']:r for r in validate_manifest(manifest,require_target=False)}
+    if lv_annotations:
+        annotations = load_annotations(lv_annotations, sources)
+        extractor = load_extractor(lv_extractor, lv_device) if lv_extractor else None
     output=[]; flat=[]
     for prediction in read_jsonl(pred_manifest):
+        begin = time.perf_counter()
         if prediction['case_id'] not in sources: raise ValueError('Prediction has no source case')
         row=sources[prediction['case_id']]; p=resolve(prediction['path'],pred_manifest.parent)
         if sha256(p)!=prediction['sha256'] or prediction['source_sha256']!=row['sha256']: raise ValueError('Prediction/source checksum mismatch')
@@ -67,6 +77,17 @@ def evaluate_predictions(predictions,manifest,config,out):
                         flat.append({'case_id':row['case_id'],'animal_id':row['animal_id'],'region':name,'kind':kind,
                             'domain':meta['intensity_domain'],**metrics})
             if config['projection']: item['projection']=projection_metrics(pred,meta,row.get('projections'))
+            if lv_annotations:
+                saved_meta = json.loads(pf.attrs.get('metadata_json', '{}'))
+                protocol = saved_meta.get('inference', {})
+                item.update(source_sha256=row['sha256'], checkpoint_sha256=prediction.get('checkpoint_sha256'),
+                            inference_protocol={key: protocol.get(key) for key in
+                                                ('mode', 'tile', 'overlap', 'split_name', 'split_hash', 'precision')},
+                            inference_seconds=prediction.get('inference_seconds'))
+                if meta['intensity_domain'] not in ('mu', 'calibrated_mu'):
+                    raise ValueError('LV evaluation expects attenuation in mm^-1')
+                item['lv'] = evaluate_lv(pred, source, meta, annotations.get(row['case_id'], {}), config, extractor)
+                item['lv']['evaluation_seconds'] = time.perf_counter() - begin
         output.append(item)
     if not output: raise ValueError('No predictions to evaluate')
     summary={'cases':len(output),'metrics':{},'metric_config':config}
@@ -81,6 +102,11 @@ def evaluate_predictions(predictions,manifest,config,out):
                 'animal_equal':stats([float(np.mean(v)) for v in animals.values()])}
         summary['metrics'][f'{region}/{kind}/{domain}']=metrics
     if config['projection']: summary['projection']=projection_summary(output)
+    if lv_annotations:
+        summary['lv'] = summarize_lv(output)
+        summary['lv'].update(annotation_sha256=sha256(lv_annotations),
+                             extractor_sha256=sha256(lv_extractor) if lv_extractor else None,
+                             boundary_unit='mm^-1', motion_error_unit='mL')
     out=Path(out); out.mkdir(parents=True,exist_ok=True)
     atomic_jsonl(out/'cases.jsonl',output); atomic_json(out/'summary.json',summary)
     if flat:

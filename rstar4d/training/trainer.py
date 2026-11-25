@@ -12,7 +12,7 @@ import uuid
 import torch
 from torch.utils.data import DataLoader
 from ..config import validate_train
-from ..models import create_model, forward_volume, initialize_stage2
+from ..models import attach_stam, create_model, forward_volume, initialize_stage2, model_from_checkpoint
 from ..data.contracts import validate_manifest, validate_split, snapshot
 from ..data.sampling import PatchDataset, validation_samples
 from ..utils.io import atomic_json, append_jsonl, read_json, canonical_hash, sha256, code_fingerprint, environment
@@ -31,6 +31,8 @@ def select_device(name):
 def signature(config,data):
     algorithm=copy.deepcopy(config)
     for key in ['device','workers','pin_memory','log_every']: algorithm.pop(key,None)
+    # The loaded SAM block travels with the checkpoint. Its old local path is provenance.
+    algorithm['stam'].pop('sam_checkpoint', None)
     return canonical_hash({'config':algorithm,'data':data,'code':code_fingerprint()})
 
 
@@ -74,14 +76,111 @@ def _write_metrics_csv(path,row):
         writer.writerow({k:row[k] for k in keys})
 
 
-def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_epoch=None):
+def make_optimizer(model, config, backbone_frozen=False):
+    block = getattr(model, 'stam', None)
+    if block is None:
+        parameters = [p for p in model.parameters() if p.requires_grad]
+    else:
+        backbone = list(_backbone(model))
+        for param in backbone:
+            param.requires_grad_(not backbone_frozen)
+        parameters = [{'name': 'stam', 'params': [p for p in block.parameters() if p.requires_grad]}]
+        if not backbone_frozen:
+            parameters.append({'name': 'backbone', 'params': backbone,
+                               'lr': config['learning_rate'] * config['stam']['backbone_lr_ratio']})
+    return torch.optim.Adam(parameters, lr=config['learning_rate'], betas=tuple(config['betas']),
+                            weight_decay=config['weight_decay'])
+
+
+def _backbone(model):
+    return (p for name, p in model.named_parameters() if not name.startswith('stam.'))
+
+
+def _unfreeze_backbone(model, optimizer, scheduler, config):
+    parameters = list(_backbone(model))
+    for param in parameters:
+        param.requires_grad_(True)
+    ratio = config['stam']['backbone_lr_ratio']
+    base_lr = config['learning_rate'] * ratio
+    lr = optimizer.param_groups[0]['lr'] * ratio
+    optimizer.add_param_group({'name': 'backbone', 'params': parameters, 'lr': lr, 'initial_lr': base_lr})
+    scheduler.base_lrs.append(base_lr)
+    scheduler._last_lr.append(lr)
+
+
+def _group_names(optimizer):
+    return [group['name'] for group in optimizer.param_groups]
+
+
+def _validate_stage2_source(value, config, rows, data):
+    expected = {'stage': 2, 'model_profile': config['model_profile'], 'normalization': config['normalization']}
+    for key in ('intensity_domain', 'calibration_application'):
+        expected[key] = rows[0]['metadata'][key]
+    for key, target in expected.items():
+        if value.get(key) != target:
+            raise ValueError(f'Original Stage II initialization {key} missing or incompatible')
+    if value.get('split') is None or validate_split(rows, value['split']) != data['split']:
+        raise ValueError('Original Stage II initialization split missing or incompatible')
+    if value.get('data_snapshot', data) != data:
+        raise ValueError('Original Stage II initialization data snapshot differs')
+    topologies = sorted({row['metadata']['temporal_topology'] for row in rows})
+    known_topologies = value.get('temporal_topologies', topologies if 'data_snapshot' in value else None)
+    if known_topologies != topologies:
+        raise ValueError('Original Stage II initialization temporal topology differs')
+    if value.get('stam') is not None:
+        raise ValueError('STAM requires original Stage II initialization weights')
+
+
+def _historical_best(path, saved):
+    if not path.is_file():
+        raise ValueError('Training checkpoint requires its historical best.pt')
+    best = load_checkpoint(path)
+    if (best.get('run_id') != saved.get('run_id') or best['signature'] != saved['signature']
+            or best['best'] != saved['best'] or best['completed_epoch'] > saved['completed_epoch']):
+        raise ValueError('best/last checkpoint lineage mismatch')
+    return best
+
+
+def _fork_prefix(path, saved, config, data, stage):
+    path = Path(path).resolve()
+    if path.name != 'last.pt' or stage != 2 or saved['stage'] != 2:
+        raise ValueError('Fork requires a Stage II last.pt and its adjacent best.pt')
+    source_stam = saved.get('stam', {})
+    target_stam = config['stam']
+    if (source_stam.get('architecture', {}).get('mode') != target_stam['mode']
+            or target_stam['mode'] == 'off'):
+        raise ValueError('Fork source and target STAM modes must match')
+    if (not source_stam.get('backbone_frozen') or source_stam.get('param_groups') != ['stam']
+            or target_stam['train_policy'] not in ('frozen', 'joint_after_warmup')):
+        raise ValueError('Fork needs a frozen STAM prefix and a frozen or warmup target policy')
+    boundary = saved['completed_epoch']
+    if not 1 <= boundary < config['epochs']['2'] or saved['next_epoch'] != boundary + 1:
+        raise ValueError('Fork checkpoint is outside the target training budget')
+    if target_stam['train_policy'] == 'joint_after_warmup' and boundary != target_stam['warmup_epochs']:
+        raise ValueError('Fork must start at the end of the target warmup')
+    if saved['data_snapshot'] != data:
+        raise ValueError('Fork parent data snapshot differs')
+    source_config = validate_train(saved['config'], stage)
+    if signature(source_config, data) != saved['signature']:
+        raise ValueError('Fork parent configuration or implementation changed')
+    source_config['stam'].update(train_policy=target_stam['train_policy'],
+                                 warmup_epochs=target_stam['warmup_epochs'])
+    if signature(source_config, data) != signature(config, data):
+        raise ValueError('Fork target algorithm or STAM setup differs from the parent')
+    return _historical_best(path.with_name('best.pt'), saved), sha256(path)
+
+
+def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_after_epoch=None, fork_from=None):
     """Train one stage; resume is guaranteed at completed epoch boundaries only."""
-    config=validate_train(config); run_dir=Path(run_dir).resolve()
+    config=validate_train(config, stage); run_dir=Path(run_dir).resolve()
     if stage not in (1,2): raise ValueError('stage must be 1 or 2')
-    if resume and init: raise ValueError('resume and init are mutually exclusive')
-    saved=load_checkpoint(resume) if resume else None
+    if sum(value is not None for value in (resume, init, fork_from)) > 1:
+        raise ValueError('resume, fork-from and initialization are mutually exclusive')
+    stam_config = config['stam']
+    enabled = stam_config['mode'] != 'off'
+    saved = load_checkpoint(resume or fork_from) if resume or fork_from else None
     if saved and saved['stage']!=stage: raise ValueError('Checkpoint stage mismatch')
-    if saved:
+    if resume:
         # Migration is supported by moving/copying the whole run, never by injecting
         # one checkpoint into an unrelated destination or losing its historical best.
         if Path(resume).resolve()!=run_dir/'checkpoints/last.pt':
@@ -89,11 +188,7 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
         identity_path=run_dir/'run_identity.json'
         if not identity_path.is_file() or read_json(identity_path).get('run_id')!=saved.get('run_id'):
             raise ValueError('Resume run ownership mismatch/missing run identity')
-        best_path=run_dir/'checkpoints/best.pt'
-        if not best_path.is_file(): raise ValueError('Resume requires the historical best.pt from the same run')
-        historical_best=load_checkpoint(best_path)
-        if historical_best.get('run_id')!=saved.get('run_id') or historical_best['signature']!=saved['signature'] or historical_best['best']!=saved['best']:
-            raise ValueError('Resume best/last checkpoint lineage mismatch')
+        _historical_best(run_dir/'checkpoints/best.pt', saved)
         run_id=saved['run_id']
     else: run_id=str(uuid.uuid4())
     if not resume and run_dir.exists() and any(run_dir.iterdir()): raise FileExistsError('Training directory is nonempty; use resume or a new run')
@@ -103,13 +198,28 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
     validation=[r for r in rows if str(r['animal_id']) in split['val']]
     if not training or not validation: raise ValueError('Training and validation animals/cases are both required')
     data=snapshot(rows,split); sig=signature(config,data)
-    if saved and saved['signature']!=sig: raise ValueError('Resume rejected: data, split, algorithm/config or implementation changed; use an explicit warm start')
+    if resume and saved['signature']!=sig: raise ValueError('Resume rejected: data, split, algorithm/config or implementation changed; use an explicit warm start')
+    parent_hash = saved.get('parent_checkpoint_sha256') if saved else None
+    if fork_from:
+        parent_best, parent_hash = _fork_prefix(fork_from, saved, config, data, stage)
+    if enabled and rows[0]['metadata']['normalization'] != config['normalization']:
+        raise ValueError('STAM training config and data normalization differ')
     device=select_device(config['device']); seed_all(config['seed'],config['deterministic'],config['threads'])
-    model=create_model(stage,config['model_profile']).to(device)
     initialization={'kind':'random','source_stage':None,'sha256':None}
+    sam_source = None
     if saved:
-        model.load_state_dict(saved['state_dict'],strict=True); initialization=saved['initialization']
+        saved_stam = saved.get('stam')
+        if bool(saved_stam) != enabled or (enabled and saved_stam['architecture']['mode'] != stam_config['mode']):
+            raise ValueError('Training checkpoint STAM architecture mismatch')
+        if enabled:
+            sam_source = saved_stam['sam_source']
+        model = model_from_checkpoint(saved)
+        initialization=saved['initialization']
     else:
+        model=create_model(stage,config['model_profile'])
+        if (enabled or (stage == 2 and (config['stage2_start_epoch'] != 1 or config['stage2_include_initial']))) and (
+                not init or init['source_stage'] != 2):
+            raise ValueError('This configuration requires --init-from-stage2 with original Stage II weights')
         if init is None and stage==1 and config['init_weights']: init={'path':config['init_weights'],'source_stage':1}
         if init:
             value=torch.load(init['path'],map_location='cpu',weights_only=True)
@@ -117,24 +227,47 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
             source_stage=int(init['source_stage'])
             if 'stage' in value and value['stage']!=source_stage: raise ValueError('Initialization stage metadata mismatch')
             if stage==1 and source_stage!=1: raise ValueError('Stage I requires Stage I initialization')
+            if enabled or (stage == 2 and (config['stage2_start_epoch'] != 1 or config['stage2_include_initial'])):
+                _validate_stage2_source(value, config, rows, data)
             if stage==2 and source_stage==1: initialize_stage2(model,state)
             else: model.load_state_dict(state,strict=True)
             initialization={'kind':'stage_transfer' if stage==2 and source_stage==1 else 'warm_start',
                 'source_stage':source_stage,'sha256':sha256(init['path']),'path':str(Path(init['path']).resolve())}
         elif stage==2: raise ValueError('Stage II needs init-from-stage1, init-from-stage2, or resume')
-    optimizer=torch.optim.Adam([p for p in model.parameters() if p.requires_grad],lr=config['learning_rate'],
-        betas=tuple(config['betas']),weight_decay=config['weight_decay'])
+        if enabled:
+            sam_source = attach_stam(model, stam_config, load_sam=True)
+    model.to(device)
+    policy = stam_config['train_policy']
+    warmup = stam_config['warmup_epochs']
+    prefix_epoch = warmup if policy == 'joint_after_warmup' else 10
+    backbone_frozen = enabled and (policy == 'frozen' or (
+        policy == 'joint_after_warmup' and (not saved or saved['completed_epoch'] <= warmup)))
+    optimizer = make_optimizer(model, config, backbone_frozen)
+    if enabled and saved:
+        names = _group_names(optimizer)
+        if (saved_stam['backbone_frozen'] != backbone_frozen or saved_stam['param_groups'] != names
+                or [group.get('name') for group in saved['optimizer']['param_groups']] != names
+                or (resume and saved_stam['train_policy'] != policy)):
+            raise ValueError('Training checkpoint has incompatible STAM optimizer groups or freeze state')
     total_epochs=config['epochs'][str(stage)]
     scheduler=(torch.optim.lr_scheduler.MultiStepLR(optimizer,milestones=config['milestones'][str(stage)],gamma=config['gamma'])
         if config['scheduler']=='multistep' else torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=total_epochs,eta_min=config['min_lr']))
     scaler=torch.cuda.amp.GradScaler(enabled=device.type=='cuda' and config['amp'])
-    start_epoch=1; step=0; best=math.inf
+    start_epoch=config['stage2_start_epoch'] if stage == 2 else 1
+    step=0; best=math.inf
     if saved:
         optimizer.load_state_dict(saved['optimizer'])
         scheduler_state=copy.deepcopy(saved['scheduler'])
         if config['scheduler']=='multistep': scheduler_state['milestones']=Counter(scheduler_state['milestones'])
         scheduler.load_state_dict(scheduler_state); scaler.load_state_dict(saved['scaler'])
         start_epoch=saved['next_epoch']; step=saved['step']; best=saved['best']; restore_rng(saved['rng'])
+    elif start_epoch > 1:
+        # Position a fresh optimizer at the matching absolute epoch without fictitious updates.
+        scheduler.last_epoch = start_epoch - 1
+        rates = scheduler._get_closed_form_lr()
+        scheduler._last_lr = rates
+        for group, rate in zip(optimizer.param_groups, rates):
+            group['lr'] = rate
     run_dir.mkdir(parents=True,exist_ok=True); ckdir=run_dir/'checkpoints'; ckdir.mkdir(exist_ok=True)
     atomic_json(run_dir/'run_identity.json',{'run_id':run_id,'stage':stage,'signature':sig})
     samples=(saved['validation_samples'] if saved else validation_samples(validation,config,stage))
@@ -142,15 +275,51 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
     atomic_json(run_dir/'resolved_config.json',config); atomic_json(run_dir/'data_snapshot.json',data)
     atomic_json(run_dir/'split.json',split); atomic_json(run_dir/'validation_samples.json',samples)
     atomic_json(run_dir/'environment.json',environment())
+    if fork_from:
+        for payload, name in ((parent_best, 'best.pt'), (saved, 'last.pt')):
+            updated = dict(payload, run_id=run_id, signature=sig, config=config, stage_complete=False,
+                           manifest=str(Path(manifest).resolve()), parent_checkpoint_sha256=parent_hash,
+                           stam=dict(payload['stam'], train_policy=policy, warmup_epochs=warmup))
+            atomic_save(ckdir/name, updated)
     if start_epoch>total_epochs:
         return {'stage':stage,'complete':True,'checkpoint':str(ckdir/'best.pt'),'last':str(ckdir/'last.pt'),'epochs':total_epochs}
     length=config['steps_per_epoch'][str(stage)] or (sum(r['shape'][1] for r in training) if stage==1 else 15*len(training))
     if length<1: raise ValueError('Empty training epoch')
     final_epoch=total_epochs if stop_after_epoch is None else min(total_epochs,int(stop_after_epoch))
+    if final_epoch < start_epoch:
+        raise ValueError('stop-after-epoch is before the next scheduled epoch')
     loss_config={**config['loss'],'normalization_scale':config['normalization']['scale'],'normalization_offset':config['normalization']['offset']}
+    if enabled:
+        from ..models.stam import architecture
+
+    def checkpoint_payload(epoch):
+        payload={'schema_version':1,'checkpoint_kind':'training','run_id':run_id,'state_dict':model.state_dict(),'stage':stage,
+            'model_profile':config['model_profile'],'completed_epoch':epoch,'next_epoch':epoch+1,'step':step,
+            'stage_complete':epoch==total_epochs,'optimizer':optimizer.state_dict(),'scheduler':scheduler.state_dict(),
+            'scaler':scaler.state_dict(),'best':best,'rng':rng_state(),'config':config,'signature':sig,
+            'data_snapshot':data,'validation_samples':samples,'initialization':initialization,
+            'manifest':str(Path(manifest).resolve()),'split':split,'environment':environment(),
+            'code_fingerprint':code_fingerprint(),'normalization':config['normalization'],
+            'intensity_domain':rows[0]['metadata']['intensity_domain'],'calibration_application':rows[0]['metadata']['calibration_application'],
+            'temporal_topologies':sorted({row['metadata']['temporal_topology'] for row in rows})}
+        if enabled:
+            payload['stam'] = {'architecture': architecture(stam_config['mode']), 'train_policy': policy,
+                               'warmup_epochs': warmup, 'backbone_frozen': backbone_frozen, 'sam_frozen': True,
+                               'param_groups': _group_names(optimizer), 'sam_source': sam_source}
+            payload['parent_checkpoint_sha256'] = parent_hash
+        return payload
+
     try:
+        if not saved and stage == 2 and config['stage2_include_initial']:
+            best = validate_model(model,validation,config,stage,samples,device)['l1']
+            atomic_save(ckdir/'best.pt', checkpoint_payload(start_epoch - 1))
+            append_jsonl(run_dir/'train.jsonl', {'event': 'initial_validation', 'epoch': start_epoch - 1, 'validation_l1': best})
         for epoch in range(start_epoch,final_epoch+1):
             begin=time.perf_counter(); model.train()
+            if enabled and backbone_frozen and policy == 'joint_after_warmup' and epoch == warmup + 1:
+                _unfreeze_backbone(model, optimizer, scheduler, config)
+                backbone_frozen = False
+            rates_used = {group['name']: group['lr'] for group in optimizer.param_groups} if enabled else None
             if device.type=='cuda': torch.cuda.reset_peak_memory_stats(device)
             dataset=PatchDataset(training,config,stage,epoch,length)
             loader=_loader(dataset,config,epoch,stage)
@@ -201,16 +370,16 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
                 'skipped_ssim':skipped,'amp_overflows':amp_overflows,'optimizer_updates':epoch_updates,
                 'sample_count':length,'shape_counts_tzyx':dict(shape_counts),'animal_draw_counts':dict(animal_counts),
                 'valid_fraction':sum(valid_ratios)/len(valid_ratios),'validation_cases':evaluation['cases']}
-            payload={'schema_version':1,'checkpoint_kind':'training','run_id':run_id,'state_dict':model.state_dict(),'stage':stage,
-                'model_profile':config['model_profile'],'completed_epoch':epoch,'next_epoch':epoch+1,'step':step,
-                'stage_complete':epoch==total_epochs,'optimizer':optimizer.state_dict(),'scheduler':scheduler.state_dict(),
-                'scaler':scaler.state_dict(),'best':best,'rng':rng_state(),'config':config,'signature':sig,
-                'data_snapshot':data,'validation_samples':samples,'initialization':initialization,
-                'manifest':str(Path(manifest).resolve()),'split':split,'environment':environment(),
-                'code_fingerprint':code_fingerprint(),'normalization':config['normalization'],
-                'intensity_domain':rows[0]['metadata']['intensity_domain'],'calibration_application':rows[0]['metadata']['calibration_application']}
+            if enabled:
+                entry.update(group_lrs=rates_used, next_group_lrs={group['name']: group['lr'] for group in optimizer.param_groups},
+                             backbone_frozen=backbone_frozen)
+            payload = checkpoint_payload(epoch)
             if improved: atomic_save(ckdir/'best.pt',payload)
             atomic_save(ckdir/'last.pt',payload)
+            if enabled and backbone_frozen and epoch == prefix_epoch:
+                warmup_dir = ckdir/'warmup'
+                atomic_save(warmup_dir/'best.pt', _historical_best(ckdir/'best.pt', payload))
+                atomic_save(warmup_dir/'last.pt', payload)
             append_jsonl(run_dir/'train.jsonl',entry); _write_metrics_csv(run_dir/'metrics.csv',entry)
             print(json.dumps(entry,ensure_ascii=False),flush=True)
         atomic_json(run_dir/'status.json',{'stage':stage,'completed_epoch':final_epoch,'complete':final_epoch==total_epochs})

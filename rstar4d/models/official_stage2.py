@@ -1,4 +1,4 @@
-"""Verbatim model classes from official Training_Tetris2.ipynb (cells 8-11).
+"""Model classes from official Training_Tetris2.ipynb (cells 8-11) with optional STAM insertion.
 Authors: Ziheng Deng and Jun Zhao. See provenance.json for source SHA256.
 """
 import torch
@@ -77,6 +77,7 @@ class upconvwithactivation(nn.Module):
 class myUNet(nn.Module):
     def __init__(self):
         super(myUNet,self).__init__()
+        self.stam = None
         cnum=16
         self.conv1=convwithactivation(2,cnum,kernel_size=[3,3,3],padding=[1,1,1],stride=[2,1,1],padding_mode='zeros')
         self.conv1_2=convwithactivation4DRSTAR(cnum,cnum,kernel_size=[3,3,3,3],padding=[1,1,1,1],stride=[1,1,1,1])
@@ -119,6 +120,8 @@ class myUNet(nn.Module):
         x3=self.conv4(x2)
         x3=self.conv4_3(self.conv4_2(x3))+x3
         
+        if self.stam is not None:
+            x3 = self.stam(x3)
         x3=self.conv5(x3)
         x3=self.conv5_3(self.conv5_2(torch.cat([x3,x2],dim=1)))+x3
         x3=self.conv6(x3)

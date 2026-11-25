@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import os
+import time
 from pathlib import Path
 import h5py
 import numpy as np
@@ -9,7 +10,7 @@ import tifffile
 from PIL import Image, ImageDraw
 from ..training.checkpoint import load_checkpoint
 from ..training.trainer import select_device
-from ..models import create_model
+from ..models import model_from_checkpoint
 from ..data.contracts import validate_manifest, validate_split
 from ..utils.io import atomic_json, atomic_jsonl, sha256, canonical_hash
 from .sliding_window import predict_volume
@@ -30,10 +31,13 @@ def preview(path,cbct,prediction,target,window=(0.,.05)):
 def predict_manifest(checkpoint,manifest,out,split_name='test',mode='tiled',tile=(32,128,128),overlap=(16,64,64),device='cuda',amp=True,export=('h5',),split=None):
     ck=load_checkpoint(checkpoint,require_training=False); dev=select_device(device)
     if not all(k in ck for k in ['stage','model_profile','normalization','intensity_domain']): raise ValueError('Checkpoint lacks inference contracts')
-    model=create_model(ck['stage'],ck['model_profile']).to(dev); model.load_state_dict(ck['state_dict'],strict=True)
+    model = model_from_checkpoint(ck).to(dev)
+    stam_structure = ck.get('stam', {}).get('architecture', {'mode': 'off'})
     rows=validate_manifest(manifest,require_target=False)
+    split_hash = None
     if split_name!='all':
         selected_split=validate_split(rows,split or ck.get('split',{}))
+        split_hash = canonical_hash(selected_split)
         rows=[r for r in rows if str(r['animal_id']) in selected_split[split_name]]
     if not rows: raise ValueError('No cases in requested inference split')
     out=Path(out).resolve()
@@ -47,9 +51,13 @@ def predict_manifest(checkpoint,manifest,out,split_name='test',mode='tiled',tile
         folder=out/row['case_id']; folder.mkdir()
         path=folder/'prediction.h5'; temp=folder/'prediction.partial'
         with h5py.File(row['path'],'r') as f:
+            start = time.perf_counter()
             predicted=predict_volume(model,f['cbct'],f['prior'],ck['normalization'],mode,tile,overlap,dev,amp)
+            inference_seconds = time.perf_counter() - start
             output_meta={**meta,'inference':{'mode':mode,'tile':list(tile),'overlap':list(overlap),'stage':ck['stage'],
-                'model_profile':ck['model_profile'],'checkpoint_sha256':checkpoint_sha,'source_sha256':row['sha256']}}
+                'model_profile':ck['model_profile'],'checkpoint_sha256':checkpoint_sha,'source_sha256':row['sha256'],
+                'stam':stam_structure,'split_name':split_name,'split_hash':split_hash,
+                'precision':'amp' if amp and dev.type == 'cuda' else 'fp32','seconds':inference_seconds}}
             with h5py.File(temp,'w') as dest:
                 dest.create_dataset('prediction',data=predicted,chunks=(1,min(predicted.shape[1],16),min(predicted.shape[2],128),min(predicted.shape[3],128)),compression='gzip',compression_opts=1)
                 dest.attrs['metadata_json']=json.dumps(output_meta,ensure_ascii=False)
@@ -64,7 +72,8 @@ def predict_manifest(checkpoint,manifest,out,split_name='test',mode='tiled',tile
             atomic_json(folder/'metadata.json',output_meta)
         record={'case_id':row['case_id'],'animal_id':row['animal_id'],'path':path.relative_to(out).as_posix(),
             'sha256':sha256(path),'source_sha256':row['sha256'],'checkpoint_sha256':checkpoint_sha,
-            'source_metadata_hash':canonical_hash(meta),'mode':mode}
+            'source_metadata_hash':canonical_hash(meta),'mode':mode,'stam_mode':stam_structure['mode'],
+            'split_hash':split_hash,'inference_seconds':inference_seconds}
         records.append(record); atomic_jsonl(out/'manifest.jsonl',records)
         print(json.dumps({'case_id':row['case_id'],'prediction':str(path)},ensure_ascii=False),flush=True)
     return out/'manifest.jsonl'

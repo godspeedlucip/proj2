@@ -1,0 +1,31 @@
+{
+  "torch": "2.3.1+cu118",
+  "model_profile": "official_v1",
+  "checkpoint": "RSTAR/githubcode/checkpoints/checkpoints_Tetris2.pth",
+  "checkpoint_sha256": "02dd0a7f9e854d36f4d0ae05f53e31dbc017a961a01a4a3554439a0b995ce42d",
+  "input": "float32 linspace(-0.3, 0.9) reshaped to (1,2,T,3,17,19)",
+  "outputs": {
+    "10": {
+      "shape": [
+        1,
+        1,
+        10,
+        3,
+        17,
+        19
+      ],
+      "sha256": "9c7d2c57c4714a7847accfc07fa77542720b6692e7ebc7e707aabcb49e21ac9b"
+    },
+    "11": {
+      "shape": [
+        1,
+        1,
+        11,
+        3,
+        17,
+        19
+      ],
+      "sha256": "3c5cb761e27908cca2aff941c98b102296fb8c78f0452e2d430d78f536fc8be6"
+    }
+  }
+}

@@ -1,0 +1,24 @@
+# RTX A6000 execution settings and matched pig Stage II patches.
+device: cuda
+amp: true
+model_profile: official_v1
+epochs: {'1': 60, '2': 30}
+learning_rate: 0.00015
+milestones: {'1': [20, 30, 40], '2': [10, 20, 25]}
+scheduler: multistep
+gamma: 0.5
+loss: {kind: public_code, ssim_weight: 0.1}
+normalization: {scale: 0.02, offset: 0.0}
+stage1_patch: [1, 256, 256]
+stage2_patches: [[16, 128, 128], [32, 96, 96], [64, 64, 64]]
+small_volume: error
+workers: 0
+seed: 2026
+
+stam:
+  mode: joint
+  train_policy: joint_after_warmup
+  warmup_epochs: 10
+  sam_checkpoint: ../../weights/sam_vit_b_01ec64.pth
+  z_chunk_size: 4
+  activation_checkpointing: false

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import copy
+import math
 from pathlib import Path
 import yaml
 from .utils.io import resolve
@@ -15,7 +16,10 @@ def train_defaults():
         'stage1_patch':[1,256,256],'stage2_patches':[[16,128,128],[32,96,96],[64,64,64]],
         'steps_per_epoch':{'1':0,'2':0},'validation_samples_per_case':1,
         'small_volume':'error','min_valid_fraction':.5,'max_attempts':32,
-        'accumulation':1,'clip_grad':None,'temporal_roll':False,'init_weights':None}
+        'accumulation':1,'clip_grad':None,'temporal_roll':False,'init_weights':None,
+        'stam':{'mode':'off','train_policy':'frozen','sam_checkpoint':None,
+                'warmup_epochs':10,'backbone_lr_ratio':.1,'z_chunk_size':1,'activation_checkpointing':True},
+        'stage2_start_epoch':1,'stage2_include_initial':False}
 
 
 def simulation_defaults():
@@ -41,7 +45,7 @@ def merge_strict(defaults,values,path=''):
     return result
 
 
-def validate_train(cfg):
+def validate_train(cfg, stage=None):
     cfg=merge_strict(train_defaults(),cfg)
     if cfg['model_profile'] not in ('official_v1','pig_ordered_v1'): raise ValueError('Unknown model profile')
     if cfg['loss']['kind'] not in ('public_code','l1','physical_ssim'): raise ValueError('Unknown loss kind')
@@ -52,14 +56,44 @@ def validate_train(cfg):
     if not 0<cfg['min_valid_fraction']<=1 or cfg['max_attempts']<1: raise ValueError('Invalid validity sampling limits')
     if cfg['validation_samples_per_case']<1: raise ValueError('validation_samples_per_case must be positive')
     if len(cfg['betas'])!=2 or any(not 0<=v<1 for v in cfg['betas']): raise ValueError('Invalid Adam betas')
-    for stage in ['1','2']:
-        if cfg['epochs'][stage]<1 or cfg['steps_per_epoch'][stage]<0: raise ValueError('Invalid epoch count')
-        m=cfg['milestones'][stage]
+    for stage_key in ['1','2']:
+        if cfg['epochs'][stage_key]<1 or cfg['steps_per_epoch'][stage_key]<0: raise ValueError('Invalid epoch count')
+        m=cfg['milestones'][stage_key]
         if m!=sorted(set(m)) or any(v<1 for v in m): raise ValueError('Milestones must be unique increasing positive integers')
     if cfg['stage1_patch'][0]!=1: raise ValueError('Stage I patch Z must be 1')
     for patch in [cfg['stage1_patch']]+cfg['stage2_patches']:
         if len(patch)!=3 or any(not isinstance(v,int) or v<1 for v in patch): raise ValueError('Invalid patch shape')
     if not cfg['stage2_patches']: raise ValueError('No Stage II patches')
+    stam = cfg['stam']
+    if stam['mode'] not in ('off', 'temporal_only', 'joint'):
+        raise ValueError('Unknown stam.mode')
+    if stam['mode'] != 'off' and stage == 1:
+        raise ValueError('STAM is supported only in Stage II')
+    if stam['train_policy'] not in ('frozen', 'joint', 'joint_after_warmup'):
+        raise ValueError('Unknown stam.train_policy')
+    if stam['sam_checkpoint'] is not None and not isinstance(stam['sam_checkpoint'], str):
+        raise ValueError('stam.sam_checkpoint must be a path')
+    if type(stam['z_chunk_size']) is not int or stam['z_chunk_size'] < 0:
+        raise ValueError('stam.z_chunk_size must be a nonnegative integer')
+    if type(stam['activation_checkpointing']) is not bool:
+        raise ValueError('stam.activation_checkpointing must be a boolean')
+    if stam['mode'] != 'off' and stam['train_policy'] != 'frozen':
+        ratio = stam['backbone_lr_ratio']
+        if type(ratio) not in (int, float) or not math.isfinite(ratio) or ratio <= 0:
+            raise ValueError('stam.backbone_lr_ratio must be finite and positive')
+    if stam['mode'] != 'off' and stam['train_policy'] == 'joint_after_warmup':
+        warmup = stam['warmup_epochs']
+        if type(warmup) is not int or not 1 <= warmup < cfg['epochs']['2']:
+            raise ValueError('stam.warmup_epochs must be between 1 and Stage II epochs minus 1')
+    else:
+        stam['warmup_epochs'] = 0
+    start = cfg['stage2_start_epoch']
+    if type(start) is not int or not 1 <= start <= cfg['epochs']['2']:
+        raise ValueError('stage2_start_epoch must be inside the Stage II epoch budget')
+    if type(cfg['stage2_include_initial']) is not bool:
+        raise ValueError('stage2_include_initial must be a boolean')
+    if (start != 1 or cfg['stage2_include_initial']) and stam['mode'] != 'off':
+        raise ValueError('Stage II control options require stam.mode=off')
     return cfg
 
 
@@ -71,6 +105,8 @@ def load_config(path=None,kind='train'):
         base=Path(path).resolve().parent
         for key in ['settings_root','settings_csv','cycle_csv','init_weights']:
             if cfg.get(key): cfg[key]=str(resolve(cfg[key],base))
+        if kind == 'train' and isinstance(cfg['stam']['sam_checkpoint'], str) and cfg['stam']['sam_checkpoint']:
+            cfg['stam']['sam_checkpoint'] = str(resolve(cfg['stam']['sam_checkpoint'], base))
         if 'calibration' in cfg:
             for key in ['csv','root']:
                 if cfg['calibration'].get(key): cfg['calibration'][key]=str(resolve(cfg['calibration'][key],base))

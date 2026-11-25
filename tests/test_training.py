@@ -88,4 +88,155 @@ class TrainingTests(unittest.TestCase):
             second=pipeline(cfg,manifest,split,root/'run')
             self.assertEqual(result['checkpoint'],second['checkpoint'])
 
+    def test_stam_first_and_second_effective_update(self):
+        from rstar4d.models import create_model, forward_volume
+        from rstar4d.training.trainer import make_optimizer
+
+        torch.set_num_threads(1)
+        torch.manual_seed(6)
+        data = torch.rand(1, 2, 10, 3, 17, 19)
+        target = torch.rand_like(data[:, :1])
+        first = {}
+        for policy in ('frozen', 'joint'):
+            torch.manual_seed(99)
+            config = train_defaults()
+            config['stam'].update(mode='joint', train_policy=policy)
+            model = create_model(2, stam=config['stam'])
+            optimizer = make_optimizer(model, config, backbone_frozen=policy == 'frozen')
+            names = ['stam'] if policy == 'frozen' else ['stam', 'backbone']
+            self.assertEqual([g['name'] for g in optimizer.param_groups], names)
+            parameters = [p for g in optimizer.param_groups for p in g['params']]
+            self.assertEqual(len(parameters), len(set(parameters)))
+            self.assertEqual(set(parameters), {p for p in model.parameters() if p.requires_grad})
+            before = {key: value.clone() for key, value in model.state_dict().items()}
+            for update in range(2):
+                model.train()
+                self.assertTrue(all(not p.requires_grad for p in model.stam.sam.parameters()))
+                pred = forward_volume(model, data)
+                if update == 0:
+                    first[policy] = pred.detach()
+                loss = (pred - target).abs().mean()
+                self.assertTrue(torch.isfinite(loss))
+                loss.backward()
+                self.assertTrue(all(p.grad is not None and torch.isfinite(p.grad).all() for p in parameters))
+                block = model.stam
+                early_layers = (block.input_projection, block.spatial_adapter.down,
+                                block.temporal_adapter.down, block.fusion_adapter.down)
+                self.assertTrue(all(bool(layer.weight.grad.any()) == bool(update) for layer in early_layers))
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                self.assertFalse(torch.equal(block.output_projection.weight, before['stam.output_projection.weight']))
+                backbone = [k for k in before if not k.startswith('stam.')]
+                self.assertEqual(any(not torch.equal(model.state_dict()[k], before[k]) for k in backbone), policy == 'joint')
+                for key, tensor in model.state_dict().items():
+                    if key.startswith('stam.sam.') or (policy == 'frozen' and not key.startswith('stam.')):
+                        self.assertTrue(torch.equal(tensor, before[key]), key)
+        self.assertTrue(torch.equal(first['frozen'], first['joint']))
+
+    def test_stam_resume_and_fork_match_uninterrupted_runs(self):
+        from rstar4d.models import create_model
+        from rstar4d.models.stam import SAMBlock
+        from rstar4d.training.checkpoint import atomic_save
+        from rstar4d.utils.io import read_jsonl, sha256
+
+        def equal_state(actual, expected):
+            self.assertEqual(actual['step'], expected['step'])
+            self.assertEqual(actual['scheduler'], expected['scheduler'])
+            self.assertEqual(actual['optimizer']['param_groups'], expected['optimizer']['param_groups'])
+            for key, tensor in actual['state_dict'].items():
+                self.assertTrue(torch.equal(tensor, expected['state_dict'][key]), key)
+            for key, values in actual['optimizer']['state'].items():
+                for name, tensor in values.items():
+                    self.assertTrue(torch.equal(tensor, expected['optimizer']['state'][key][name]), name)
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cfg, manifest, split = inputs(root)
+            cfg['epochs']['2'] = 3
+            cfg['milestones']['2'] = [1, 2]
+            cfg['steps_per_epoch']['2'] = 1
+            torch.manual_seed(79)
+            stage2 = root/'source.pt'
+            atomic_save(stage2, dict(stage=2, schema_version=1, checkpoint_kind='weights',
+                model_profile=cfg['model_profile'], state_dict=create_model(2).state_dict(),
+                normalization=cfg['normalization'], calibration_application='none', intensity_domain='mu',
+                temporal_topologies=['ordered_states'], split={'train':['a'], 'val':['b'], 'test':['c']}))
+            source = {'path': stage2, 'source_stage': 2}
+            sam = root/'sam.pt'
+            torch.save({'image_encoder.blocks.5.' + k: v for k, v in SAMBlock().state_dict().items()}, sam)
+            cfg['stam'].update(mode='joint', warmup_epochs=1, sam_checkpoint=str(sam))
+
+            for policy in ('frozen', 'joint', 'joint_after_warmup'):
+                cfg['stam']['train_policy'] = policy
+                full, resumed = root/f'{policy}-full', root/f'{policy}-resumed'
+                train(cfg, manifest, split, full, 2, init=source)
+                train(cfg, manifest, split, resumed, 2, init=source, stop_after_epoch=1)
+                saved = resumed/'checkpoints/last.pt'
+                if policy == 'frozen':
+                    parent = resumed/'checkpoints/prefix'
+                    parent.mkdir()
+                    for name in ('last.pt', 'best.pt'):
+                        (parent/name).write_bytes((saved.with_name(name)).read_bytes())
+                sam.rename(root/'sam.offline')
+                train(cfg, manifest, split, resumed, 2, resume=saved, stop_after_epoch=2)
+                train(cfg, manifest, split, resumed, 2, resume=saved)
+                (root/'sam.offline').rename(sam)
+                equal_state(load_checkpoint(saved), load_checkpoint(full/'checkpoints/last.pt'))
+                def lrs(path):
+                    return [r['group_lrs'] for r in read_jsonl(path/'train.jsonl') if r['event'] == 'epoch']
+                self.assertEqual(lrs(full), lrs(resumed))
+                if policy == 'joint_after_warmup':
+                    joint_full = full
+                    expected = [{'stam': .00015}, {'stam': .000075, 'backbone': .0000075},
+                                {'stam': .0000375, 'backbone': .00000375}]
+                    for actual, rates in zip(lrs(full), expected):
+                        self.assertEqual(actual.keys(), rates.keys())
+                        for name, rate in rates.items():
+                            self.assertAlmostEqual(actual[name], rate, places=15)
+                    self.assertEqual(load_checkpoint(full/'checkpoints/warmup/last.pt')['stam']['param_groups'], ['stam'])
+
+            fork = root/'forked'
+            train(cfg, manifest, split, fork, 2, fork_from=parent/'last.pt')
+            forked = load_checkpoint(fork/'checkpoints/last.pt')
+            self.assertEqual(forked['parent_checkpoint_sha256'], sha256(parent/'last.pt'))
+            equal_state(forked, load_checkpoint(joint_full/'checkpoints/last.pt'))
+
+            cfg['stam']['train_policy'] = 'frozen'
+            frozen_fork = root/'forked-frozen'
+            train(cfg, manifest, split, frozen_fork, 2, fork_from=parent/'last.pt')
+            equal_state(load_checkpoint(frozen_fork/'checkpoints/last.pt'),
+                        load_checkpoint(root/'frozen-full/checkpoints/last.pt'))
+            with self.assertRaisesRegex(ValueError, 'snapshot differs'):
+                train(cfg, manifest, {'train':['b'],'val':['a'],'test':['c']}, root/'bad-data', 2,
+                      fork_from=parent/'last.pt')
+            cfg['stam']['mode'] = 'temporal_only'
+            with self.assertRaisesRegex(ValueError, 'modes must match'):
+                train(cfg, manifest, split, root/'bad-mode', 2, fork_from=parent/'last.pt')
+
+    def test_original_control_starts_on_absolute_epoch_and_lr(self):
+        from unittest.mock import patch
+        from rstar4d.data.sampling import PatchDataset
+        from rstar4d.models import create_model
+        from rstar4d.training.checkpoint import atomic_save
+        from rstar4d.utils.io import read_jsonl
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cfg, manifest, split = inputs(root)
+            cfg.update(stage2_start_epoch=2, stage2_include_initial=True, learning_rate=.000015)
+            cfg['milestones']['2'] = [1]
+            source = root/'source.pt'
+            atomic_save(source, dict(stage=2, schema_version=1, checkpoint_kind='weights',
+                model_profile=cfg['model_profile'], state_dict=create_model(2).state_dict(),
+                normalization=cfg['normalization'], calibration_application='none', intensity_domain='mu',
+                temporal_topologies=['ordered_states'], split={'train':['a'], 'val':['b'], 'test':['c']}))
+            with patch('rstar4d.training.trainer.PatchDataset', wraps=PatchDataset) as datasets:
+                train(cfg, manifest, split, root/'control', 2, init={'path':source,'source_stage':2})
+            self.assertEqual([call.args[3] for call in datasets.call_args_list], [0, 2, 0])
+            events = read_jsonl(root/'control/train.jsonl')
+            self.assertEqual(events[0]['event'], 'initial_validation')
+            self.assertEqual(events[-1]['epoch'], 2)
+            self.assertAlmostEqual(events[-1]['lr'], .0000075)
+            self.assertEqual(events[-1]['steps'], cfg['steps_per_epoch']['2'])
+
 if __name__=='__main__': unittest.main()
