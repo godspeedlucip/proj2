@@ -114,3 +114,5 @@ Stage I默认每epoch的draw数为训练病例z层数之和，Stage II为15×病
 ## Stage II STAM
 
 [RTX A6000 训练命令、实验配置与验收记录](docs/stam-training.md)
+
+[PIDA 二维 DA 的 A/B 配对、仅 DA 训练和验收](docs/pida-training.md)

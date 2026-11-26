@@ -30,7 +30,7 @@ def parser():
         d=sub.add_parser(command); d.add_argument('--config'); d.add_argument('--manifest'); d.add_argument('--split'); d.add_argument('--run-dir')
         if command=='train':
             d.add_argument('--stage',type=int,choices=[1,2]); d.add_argument('--stop-after-epoch',type=int)
-            group=d.add_mutually_exclusive_group(); group.add_argument('--resume'); group.add_argument('--init-from-stage1'); group.add_argument('--init-from-stage2'); group.add_argument('--fork-from')
+            group=d.add_mutually_exclusive_group(); group.add_argument('--resume'); group.add_argument('--init-from-stage1'); group.add_argument('--init-from-stage2'); group.add_argument('--init-from-stam'); group.add_argument('--fork-from')
     d=sub.add_parser('infer'); d.add_argument('--checkpoint',required=True); d.add_argument('--manifest',required=True); d.add_argument('--out',required=True)
     d.add_argument('--split'); d.add_argument('--split-name',choices=['train','val','test','all'],default='test'); d.add_argument('--mode',choices=['full','tiled'],default='tiled')
     d.add_argument('--tile',nargs=3,type=int,default=[32,128,128]); d.add_argument('--overlap',nargs=3,type=int,default=[16,64,64]); d.add_argument('--device',default='cuda'); d.add_argument('--fp32',action='store_true'); d.add_argument('--export',nargs='+',choices=['h5','tif','nii'],default=['h5'])
@@ -71,7 +71,8 @@ def doctor(skip_tigre=False):
 
 def benchmark(config, stage, t, steps, weights=None):
     from .config import validate_train
-    from .models import attach_stam, create_model, forward_volume, initialize_stage2, model_from_checkpoint
+    from .models import attach_pida, attach_stam, create_model, forward_volume, initialize_stage2, model_from_checkpoint
+    from .models.pida_da import FUSION_WEIGHT_NAMES, architecture as pida_architecture, is_pida_parameter
     from .training.trainer import make_optimizer, select_device
     from .training.losses import compute_loss
     from .utils.seed import seed_all
@@ -86,11 +87,14 @@ def benchmark(config, stage, t, steps, weights=None):
                               value.get('model_profile', config['model_profile']) != config['model_profile']):
         raise ValueError('Benchmark checkpoint stage or model profile differs from the configuration')
     if value is not None and value.get('stam') and config['stam']['mode'] == 'off':
-        from_checkpoint = value['config']['stam']
-        config = validate_train(dict(config, stam=from_checkpoint), stage)
+        from_checkpoint = value['config']
+        config = validate_train(dict(config, stam=from_checkpoint['stam'],
+                                     pida_da=from_checkpoint.get('pida_da', config['pida_da'])), stage)
     stam = config['stam']
     enabled = stam['mode'] != 'off'
-    backbone_frozen = enabled and stam['train_policy'] != 'joint'
+    pida = config['pida_da']
+    pida_only = pida['train_policy'] == 'pida_only'
+    backbone_frozen = enabled and (pida_only or stam['train_policy'] != 'joint')
     results = []
     sam_source = None
     norm = config['normalization']
@@ -113,12 +117,21 @@ def benchmark(config, stage, t, steps, weights=None):
                 initialize_stage2(model, create_model(1, config['model_profile']).state_dict())
             if enabled:
                 sam_source = attach_stam(model, stam, load_sam=True)
+        if getattr(model, 'pida_da', None) is not None:
+            if value['pida_da'] != pida_architecture(pida):
+                raise ValueError('Benchmark checkpoint pida_da architecture differs from the configuration')
+            model.pida_da.query_chunk_size = pida['query_chunk_size']
+            model.pida_da.plane_batch_size = pida['plane_batch_size']
+        else:
+            attach_pida(model, pida)
         model.to(device).train()
         optimizer = make_optimizer(model, config, backbone_frozen)
         use_amp = device.type == 'cuda' and config['amp']
         scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
-        x = torch.rand(1, 2, t, *patch, device=device)
-        target = torch.rand(1, 1, t, *patch, device=device)
+        generator = torch.Generator(device=device).manual_seed(config['seed'])
+        x = torch.rand(1, 2, t, *patch, device=device, generator=generator)
+        x[:, 1] = x[:, 1, :1].clone()
+        target = torch.rand(1, 1, t, *patch, device=device, generator=generator)
         valid = torch.ones_like(target, dtype=torch.bool)
         before = {name: param.detach().cpu().clone() for name, param in model.named_parameters()}
         if device.type == 'cuda':
@@ -152,14 +165,21 @@ def benchmark(config, stage, t, steps, weights=None):
         peak_allocated = torch.cuda.max_memory_allocated(device) / 1024**3 if device.type == 'cuda' else None
         peak_reserved = torch.cuda.max_memory_reserved(device) / 1024**3 if device.type == 'cuda' else None
         changed = {name for name, param in model.named_parameters() if not torch.equal(before[name], param.detach().cpu())}
-        backbone_changed = any(not name.startswith('stam.') for name in changed)
+        backbone_changed = any(not name.startswith('stam.') and not is_pida_parameter(name) for name in changed)
+        fusion_changed = bool(FUSION_WEIGHT_NAMES & changed)
+        da_changed = any(name.startswith('pida_da.') for name in changed)
         projection_changed = 'stam.output_projection.weight' in changed
         sam_changed = any(name.startswith('stam.sam.') for name in changed)
         expected_update = (projection_changed and not sam_changed and backbone_changed != backbone_frozen
                            if enabled else backbone_changed)
+        if pida_only:
+            expected_update = da_changed and all(name.startswith('pida_da.') for name in changed)
+        elif pida['enabled']:
+            expected_update = expected_update and fusion_changed and (da_changed or steps == 1)
         if updates != steps or not expected_update:
             raise RuntimeError(f'Benchmark update failed: useful={updates}/{steps}, overflows={overflows}, '
-                               f'backbone={backbone_changed}, output_projection={projection_changed}, SAM={sam_changed}')
+                               f'backbone={backbone_changed}, output_projection={projection_changed}, '
+                               f'SAM={sam_changed}, DA={da_changed}, fusion={fusion_changed}')
         trainable = sum(param.numel() for param in model.parameters() if param.requires_grad)
         parameters = sum(param.numel() for param in model.parameters())
         optimizer.zero_grad(set_to_none=True)
@@ -179,7 +199,8 @@ def benchmark(config, stage, t, steps, weights=None):
             'parameter_update': expected_update, 'loss': loss_value,
             'parameters': parameters, 'trainable_parameters': trainable,
             'backbone_changed': backbone_changed, 'output_projection_changed': projection_changed,
-            'sam_changed': sam_changed, 'peak_allocated_gib': peak_allocated, 'peak_reserved_gib': peak_reserved,
+            'sam_changed': sam_changed, 'pida_da_changed': da_changed, 'pida_fusion_changed': fusion_changed,
+            'peak_allocated_gib': peak_allocated, 'peak_reserved_gib': peak_reserved,
             'gpu_free_at_start_gib': free / 1024**3 if device.type == 'cuda' else None,
             'gpu_total_gib': total / 1024**3 if device.type == 'cuda' else None,
         })
@@ -189,7 +210,7 @@ def benchmark(config, stage, t, steps, weights=None):
             torch.cuda.empty_cache()
     return {'environment': environment(), 'stage': stage, 'model_profile': config['model_profile'],
             'config': config, 'weights_sha256': sha256(weights) if weights else None,
-            'sam_source': sam_source, 'results': results}
+            'sam_source': sam_source, 'pida_da': pida_architecture(pida), 'results': results}
 
 def dispatch(args):
     command=args.command
@@ -252,6 +273,7 @@ def dispatch(args):
         init=None
         if args.init_from_stage1: init={'path':args.init_from_stage1,'source_stage':1}
         if args.init_from_stage2: init={'path':args.init_from_stage2,'source_stage':2}
+        if args.init_from_stam: init={'path':args.init_from_stam,'source_stage':2,'kind':'stam'}
         return train(cfg,args.manifest,args.split,args.run_dir,args.stage,init=init,stop_after_epoch=args.stop_after_epoch,fork_from=args.fork_from)
     if command=='infer':
         from .inference.predict import predict_manifest

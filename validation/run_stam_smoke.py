@@ -12,6 +12,7 @@ from rstar4d.cli import main
 from rstar4d.config import load_config
 from rstar4d.data.contracts import read_manifest, write_case, write_manifest
 from rstar4d.inference.sliding_window import starts
+from rstar4d.models.pida_da import is_pida_parameter
 from rstar4d.training.checkpoint import load_checkpoint
 from rstar4d.utils.io import atomic_json, atomic_jsonl, read_json, read_jsonl, sha256
 from tests.test_training import inputs
@@ -38,7 +39,14 @@ def seam_report(full_path, tiled_path, tile, overlap):
         if (a['case_id'], a['source_sha256']) != (b['case_id'], b['source_sha256']):
             raise ValueError('Full/tiled inputs differ')
         with h5py.File(Path(full_path)/a['path'], 'r') as af, h5py.File(Path(tiled_path)/b['path'], 'r') as bf:
-            diff = np.abs(af['prediction'][:] - bf['prediction'][:])
+            full_data, tiled_data = af['prediction'][:], bf['prediction'][:]
+            full_meta, tiled_meta = [json.loads(f.attrs['metadata_json']) for f in (af, bf)]
+            for key in ('phase_labels', 'intensity_domain', 'normalization', 'calibration_application'):
+                if full_meta[key] != tiled_meta[key]:
+                    raise ValueError(f'Full/tiled {key} differs')
+            if full_data.shape != tiled_data.shape or not all(np.isfinite(x).all() for x in (full_data, tiled_data)):
+                raise ValueError('Full/tiled predictions must be finite and have matching shapes')
+            diff = np.abs(full_data - tiled_data)
         shape = diff.shape[1:]
         center = tuple(slice((n-1)//2 - min(4, n//4), (n-1)//2 + min(4, n//4) + 1) for n in shape)
         seam = np.zeros(shape, dtype=bool)
@@ -116,6 +124,66 @@ def phantom_smoke(root, device, sam):
     return results
 
 
+def pida_smoke(root, phantom, device):
+    root.mkdir()
+    parent = phantom/'joint/checkpoints/best.pt'
+    manifest = phantom/'manifest.jsonl'
+    split = phantom/'split.json'
+    annotations = phantom/'synthetic_lv.jsonl'
+    extractor = phantom/'threshold_fixture.pt'
+    config = load_config(phantom/'joint.yaml')
+    config.update(device=device, amp=False, deterministic=device == 'cpu')
+    config['stam']['sam_checkpoint'] = None
+    config['steps_per_epoch']['2'] = 1
+    tile, overlap = (4,16,8), (2,8,0)
+    source_sha = sha256(parent)
+    source_state = load_checkpoint(parent)['state_dict']
+
+    def evaluate(checkpoint, run):
+        preview = infer_both(checkpoint, manifest, run/'predictions', device, tile, overlap, 'val')
+        cli('evaluate', '--predictions', run/'predictions/tiled', '--manifest', manifest,
+            '--out', run/'evaluation', '--lv-annotations', annotations, '--lv-extractor', extractor)
+        return preview
+
+    f0 = root/'pida_only_reference'
+    results = {'pida_only_reference': {'full_vs_tiled': evaluate(parent, f0)}}
+    for name in ('control', 'da', 'pida_only'):
+        config['pida_da'].update(enabled=name != 'control',
+                                 train_policy='pida_only' if name == 'pida_only' else 'stam')
+        cfg_file = root/f'{name}.yaml'
+        cfg_file.write_text(yaml.safe_dump(config), encoding='utf-8')
+        run = root/name
+        cli('train', '--stage', 2, '--config', cfg_file, '--manifest', manifest, '--split', split,
+            '--init-from-stam', parent, '--run-dir', run, '--stop-after-epoch', 1)
+        last = run/'checkpoints/last.pt'
+        cli('train', '--resume', last, '--stop-after-epoch', 2)
+        checkpoint = load_checkpoint(last)
+        if checkpoint['step'] != 2:
+            raise ValueError('Expected two effective PIDA smoke updates')
+        preview = evaluate(last, run)
+        inference = read_json(run/'predictions/tiled/b/metadata.json')['inference']
+        if inference['pida_da'] != checkpoint['pida_da'] or inference['parent_checkpoint_sha256'] != source_sha:
+            raise ValueError('PIDA inference provenance differs from the checkpoint')
+        state = checkpoint['state_dict']
+        host_changes = sum(not torch.equal(weight, state[key]) for key, weight in source_state.items())
+        if name == 'pida_only' and host_changes:
+            raise ValueError('DA-only training changed frozen host parameters or buffers')
+        results[name] = {'step': checkpoint['step'], 'pida_da': checkpoint['pida_da'],
+                         'param_groups': checkpoint['stam']['param_groups'], 'full_vs_tiled': preview,
+                         'pida_parameters': sum(value.numel() for key, value in state.items() if is_pida_parameter(key)),
+                         'host_changed_tensors': host_changes,
+                         'sample_sequence': [entry['sample_sequence_sha256'] for entry in read_jsonl(run/'train.jsonl')
+                                             if entry['event'] == 'epoch']}
+    if results['control']['sample_sequence'] != results['da']['sample_sequence']:
+        raise ValueError('PIDA A/B patch sequence mismatch')
+    for name, reference in (('da', root/'control/evaluation'), ('pida_only', f0/'evaluation')):
+        report = root/f'{name}_paired.json'
+        cli('compare-stam', '--candidate', root/name/'evaluation', '--reference', reference,
+            '--seed', 2026, '--out', report)
+        results[name]['paired_summary'] = read_json(report)['summary']
+    return results
+
+
 def pig_crop_smoke(manifest, root, device):
     root.mkdir()
     row = read_manifest(manifest)[0]
@@ -163,11 +231,18 @@ def run():
     parser.add_argument('--sam', type=Path, default=Path('weights/sam_vit_b_01ec64.pth'))
     parser.add_argument('--device', default='cpu')
     parser.add_argument('--real-manifest', type=Path)
+    parser.add_argument('--pida', action='store_true', help='Also check paired PIDA continuation and DA-only training')
+    parser.add_argument('--pida-phantom', type=Path,
+                        help='Reuse a phantom output folder from a prior STAM smoke run as the parent fixture')
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=False)
     torch.set_num_threads(1)
-    summary = {'scope': 'Synthetic CLI checks and optional cross-domain public-weight crop inspection',
-               'phantom': phantom_smoke(args.out/'phantom', args.device, args.sam)}
+    summary = {'scope': 'Synthetic CLI checks and optional cross-domain public-weight crop inspection'}
+    phantom = args.pida_phantom or args.out/'phantom'
+    if args.pida_phantom is None:
+        summary['phantom'] = phantom_smoke(phantom, args.device, args.sam)
+    if args.pida or args.pida_phantom:
+        summary['pida'] = pida_smoke(args.out/'pida', phantom, args.device)
     if args.real_manifest:
         summary['pig_crop_public_weights'] = pig_crop_smoke(args.real_manifest, args.out/'pig_crop', args.device)
     atomic_json(args.out/'summary.json', summary)

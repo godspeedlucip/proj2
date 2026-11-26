@@ -16,6 +16,10 @@ class CliTests(unittest.TestCase):
             'validate-data','convert-weights','train','pipeline','infer','evaluate','benchmark']:
             self.assertIn(name,text)
 
+    def test_stam_warm_start_is_mutually_exclusive(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser().parse_args(['train', '--init-from-stam', 'parent.pt', '--resume', 'last.pt'])
+
     @unittest.skipUnless(torch.cuda.is_available(),'End-to-end fixture uses actual TIGRE CUDA')
     def test_two_entry_points_end_to_end(self):
         with tempfile.TemporaryDirectory() as d:

@@ -3,6 +3,7 @@ from collections import defaultdict, Counter
 import contextlib
 import copy
 import csv
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -12,7 +13,8 @@ import uuid
 import torch
 from torch.utils.data import DataLoader
 from ..config import validate_train
-from ..models import attach_stam, create_model, forward_volume, initialize_stage2, model_from_checkpoint
+from ..models import attach_pida, attach_stam, create_model, forward_volume, initialize_stage2, model_from_checkpoint
+from ..models.pida_da import architecture as pida_architecture, is_pida_parameter
 from ..data.contracts import validate_manifest, validate_split, snapshot
 from ..data.sampling import PatchDataset, validation_samples
 from ..utils.io import atomic_json, append_jsonl, read_json, canonical_hash, sha256, code_fingerprint, environment
@@ -78,13 +80,21 @@ def _write_metrics_csv(path,row):
 
 def make_optimizer(model, config, backbone_frozen=False):
     block = getattr(model, 'stam', None)
-    if block is None:
+    da = getattr(model, 'pida_da', None)
+    if da is not None and da.fusion == 'residual':
+        model.requires_grad_(False)
+        da.requires_grad_(True)
+        parameters = [{'name': 'pida_da', 'params': list(da.parameters())}]
+    elif block is None:
         parameters = [p for p in model.parameters() if p.requires_grad]
     else:
         backbone = list(_backbone(model))
         for param in backbone:
             param.requires_grad_(not backbone_frozen)
         parameters = [{'name': 'stam', 'params': [p for p in block.parameters() if p.requires_grad]}]
+        if da is not None:
+            parameters.append({'name': 'pida_da', 'params': [
+                p for name, p in model.named_parameters() if is_pida_parameter(name)]})
         if not backbone_frozen:
             parameters.append({'name': 'backbone', 'params': backbone,
                                'lr': config['learning_rate'] * config['stam']['backbone_lr_ratio']})
@@ -93,7 +103,7 @@ def make_optimizer(model, config, backbone_frozen=False):
 
 
 def _backbone(model):
-    return (p for name, p in model.named_parameters() if not name.startswith('stam.'))
+    return (p for name, p in model.named_parameters() if not name.startswith('stam.') and not is_pida_parameter(name))
 
 
 def _unfreeze_backbone(model, optimizer, scheduler, config):
@@ -102,7 +112,11 @@ def _unfreeze_backbone(model, optimizer, scheduler, config):
         param.requires_grad_(True)
     ratio = config['stam']['backbone_lr_ratio']
     base_lr = config['learning_rate'] * ratio
-    lr = optimizer.param_groups[0]['lr'] * ratio
+    if config['scheduler'] == 'cosine':
+        factor = (1. + math.cos(math.pi * scheduler.last_epoch / scheduler.T_max)) / 2.
+        lr = scheduler.eta_min + (base_lr - scheduler.eta_min) * factor
+    else:
+        lr = optimizer.param_groups[0]['lr'] * ratio
     optimizer.add_param_group({'name': 'backbone', 'params': parameters, 'lr': lr, 'initial_lr': base_lr})
     scheduler.base_lrs.append(base_lr)
     scheduler._last_lr.append(lr)
@@ -112,22 +126,29 @@ def _group_names(optimizer):
     return [group['name'] for group in optimizer.param_groups]
 
 
-def _validate_stage2_source(value, config, rows, data):
+def _validate_stage2_source(value, config, rows, data, paired=False):
+    source = 'Parent STAM' if paired else 'Original Stage II initialization'
     expected = {'stage': 2, 'model_profile': config['model_profile'], 'normalization': config['normalization']}
     for key in ('intensity_domain', 'calibration_application'):
         expected[key] = rows[0]['metadata'][key]
     for key, target in expected.items():
         if value.get(key) != target:
-            raise ValueError(f'Original Stage II initialization {key} missing or incompatible')
+            raise ValueError(f'{source} {key} missing or incompatible')
     if value.get('split') is None or validate_split(rows, value['split']) != data['split']:
-        raise ValueError('Original Stage II initialization split missing or incompatible')
-    if value.get('data_snapshot', data) != data:
-        raise ValueError('Original Stage II initialization data snapshot differs')
+        raise ValueError(f'{source} split missing or incompatible')
+    if value.get('data_snapshot', None if paired else data) != data:
+        raise ValueError(f'{source} data_snapshot missing or incompatible')
     topologies = sorted({row['metadata']['temporal_topology'] for row in rows})
     known_topologies = value.get('temporal_topologies', topologies if 'data_snapshot' in value else None)
     if known_topologies != topologies:
-        raise ValueError('Original Stage II initialization temporal topology differs')
-    if value.get('stam') is not None:
+        raise ValueError(f'{source} temporal_topologies differ')
+    if paired:
+        stam = value.get('stam') or {}
+        if stam.get('architecture', {}).get('mode') != 'joint':
+            raise ValueError('Parent STAM architecture must use stam.mode=joint')
+        if value.get('pida_da', {}).get('enabled', False):
+            raise ValueError('Parent STAM checkpoint already contains PIDA DA')
+    elif value.get('stam') is not None:
         raise ValueError('STAM requires original Stage II initialization weights')
 
 
@@ -177,6 +198,14 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
     if sum(value is not None for value in (resume, init, fork_from)) > 1:
         raise ValueError('resume, fork-from and initialization are mutually exclusive')
     stam_config = config['stam']
+    pida_config = config['pida_da']
+    pida_only = pida_config['train_policy'] == 'pida_only'
+    pida_structure = pida_architecture(pida_config)
+    paired = bool(init and init.get('kind') == 'stam')
+    if paired and (stage != 2 or stam_config['mode'] != 'joint'):
+        raise ValueError('--init-from-stam requires Stage II and stam.mode=joint')
+    if pida_config['enabled'] and not (paired or resume):
+        raise ValueError('PIDA DA training requires --init-from-stam or --resume')
     enabled = stam_config['mode'] != 'off'
     saved = load_checkpoint(resume or fork_from) if resume or fork_from else None
     if saved and saved['stage']!=stage: raise ValueError('Checkpoint stage mismatch')
@@ -198,7 +227,13 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
     validation=[r for r in rows if str(r['animal_id']) in split['val']]
     if not training or not validation: raise ValueError('Training and validation animals/cases are both required')
     data=snapshot(rows,split); sig=signature(config,data)
-    if resume and saved['signature']!=sig: raise ValueError('Resume rejected: data, split, algorithm/config or implementation changed; use an explicit warm start')
+    if resume:
+        if saved.get('pida_da', {'enabled': False}) != pida_structure:
+            raise ValueError('Resume rejected: pida_da architecture mismatch')
+        if saved['data_snapshot'] != data:
+            raise ValueError('Resume rejected: data_snapshot or split differs')
+        if saved['signature'] != sig:
+            raise ValueError('Resume rejected: algorithm/config or implementation changed; use an explicit warm start')
     parent_hash = saved.get('parent_checkpoint_sha256') if saved else None
     if fork_from:
         parent_best, parent_hash = _fork_prefix(fork_from, saved, config, data, stage)
@@ -215,6 +250,22 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
             sam_source = saved_stam['sam_source']
         model = model_from_checkpoint(saved)
         initialization=saved['initialization']
+    elif paired:
+        value = load_checkpoint(init['path'], require_training=False)
+        _validate_stage2_source(value, config, rows, data, paired=True)
+        try:
+            model = model_from_checkpoint(value)
+        except RuntimeError as exc:
+            raise ValueError(f'Parent STAM state_dict failed strict loading: {exc}') from exc
+        model.stam.z_chunk_size = stam_config['z_chunk_size']
+        model.stam.activation_checkpointing = stam_config['activation_checkpointing']
+        sam_source = value['stam'].get('sam_source')
+        parent_hash = sha256(init['path'])
+        initialization = {'kind': 'stam_warm_start', 'source_stage': 2, 'sha256': parent_hash,
+                          'source_run_id': value.get('run_id'), 'source_train_policy': value['stam'].get('train_policy'),
+                          'path': str(Path(init['path']).resolve())}
+        attach_pida(model, pida_config)
+        del value
     else:
         model=create_model(stage,config['model_profile'])
         if (enabled or (stage == 2 and (config['stage2_start_epoch'] != 1 or config['stage2_include_initial']))) and (
@@ -240,7 +291,7 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
     policy = stam_config['train_policy']
     warmup = stam_config['warmup_epochs']
     prefix_epoch = warmup if policy == 'joint_after_warmup' else 10
-    backbone_frozen = enabled and (policy == 'frozen' or (
+    backbone_frozen = enabled and (pida_only or policy == 'frozen' or (
         policy == 'joint_after_warmup' and (not saved or saved['completed_epoch'] <= warmup)))
     optimizer = make_optimizer(model, config, backbone_frozen)
     if enabled and saved:
@@ -269,7 +320,10 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
         for group, rate in zip(optimizer.param_groups, rates):
             group['lr'] = rate
     run_dir.mkdir(parents=True,exist_ok=True); ckdir=run_dir/'checkpoints'; ckdir.mkdir(exist_ok=True)
-    atomic_json(run_dir/'run_identity.json',{'run_id':run_id,'stage':stage,'signature':sig})
+    identity = {'run_id':run_id, 'stage':stage, 'signature':sig}
+    if parent_hash is not None:
+        identity['parent_checkpoint_sha256'] = parent_hash
+    atomic_json(run_dir/'run_identity.json',identity)
     samples=(saved['validation_samples'] if saved else validation_samples(validation,config,stage))
     # Validation sample identity is part of the checkpoint, including patch shapes/origins.
     atomic_json(run_dir/'resolved_config.json',config); atomic_json(run_dir/'data_snapshot.json',data)
@@ -292,6 +346,8 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
     if enabled:
         from ..models.stam import architecture
 
+    prior_modes = {row['case_id']: row['metadata'].get('prior_mode', 'unspecified') for row in rows}
+
     def checkpoint_payload(epoch):
         payload={'schema_version':1,'checkpoint_kind':'training','run_id':run_id,'state_dict':model.state_dict(),'stage':stage,
             'model_profile':config['model_profile'],'completed_epoch':epoch,'next_epoch':epoch+1,'step':step,
@@ -306,6 +362,8 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
             payload['stam'] = {'architecture': architecture(stam_config['mode']), 'train_policy': policy,
                                'warmup_epochs': warmup, 'backbone_frozen': backbone_frozen, 'sam_frozen': True,
                                'param_groups': _group_names(optimizer), 'sam_source': sam_source}
+            payload['pida_da'] = pida_structure
+            payload['prior_modes'] = prior_modes
             payload['parent_checkpoint_sha256'] = parent_hash
         return payload
 
@@ -316,7 +374,7 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
             append_jsonl(run_dir/'train.jsonl', {'event': 'initial_validation', 'epoch': start_epoch - 1, 'validation_l1': best})
         for epoch in range(start_epoch,final_epoch+1):
             begin=time.perf_counter(); model.train()
-            if enabled and backbone_frozen and policy == 'joint_after_warmup' and epoch == warmup + 1:
+            if enabled and not pida_only and backbone_frozen and policy == 'joint_after_warmup' and epoch == warmup + 1:
                 _unfreeze_backbone(model, optimizer, scheduler, config)
                 backbone_frozen = False
             rates_used = {group['name']: group['lr'] for group in optimizer.param_groups} if enabled else None
@@ -325,9 +383,13 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
             loader=_loader(dataset,config,epoch,stage)
             total_loss=0.; total_l1=0.; skipped=0; valid_ratios=[]; amp_overflows=0; epoch_updates=0; shape_counts=Counter(); animal_counts=Counter()
             optimizer.zero_grad(set_to_none=True)
+            draw_hash = hashlib.sha256() if initialization['kind'] == 'stam_warm_start' else None
             for index,batch in enumerate(loader):
                 x=batch['input'].to(device); target=batch['target'].to(device); valid=batch['valid'].to(device)
                 shape_counts['x'.join(map(str,x.shape[2:]))]+=1; animal_counts[batch['animal_id'][0]]+=1
+                if draw_hash is not None:
+                    draw = [batch['case_id'][0], batch['origin'][0].tolist(), list(x.shape[2:])]
+                    draw_hash.update((json.dumps(draw) + '\n').encode('utf-8'))
                 with _amp(device,config['amp']): pred=forward_volume(model,x)
                 loss=compute_loss(pred,target,valid,stage,loss_config)
                 if not torch.isfinite(loss['total']): raise FloatingPointError(f'Nonfinite loss at {batch["case_id"]}, epoch={epoch}, draw={index}')
@@ -373,10 +435,12 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
             if enabled:
                 entry.update(group_lrs=rates_used, next_group_lrs={group['name']: group['lr'] for group in optimizer.param_groups},
                              backbone_frozen=backbone_frozen)
+            if draw_hash is not None:
+                entry['sample_sequence_sha256'] = draw_hash.hexdigest()
             payload = checkpoint_payload(epoch)
             if improved: atomic_save(ckdir/'best.pt',payload)
             atomic_save(ckdir/'last.pt',payload)
-            if enabled and backbone_frozen and epoch == prefix_epoch:
+            if enabled and not pida_config['enabled'] and backbone_frozen and epoch == prefix_epoch:
                 warmup_dir = ckdir/'warmup'
                 atomic_save(warmup_dir/'best.pt', _historical_best(ckdir/'best.pt', payload))
                 atomic_save(warmup_dir/'last.pt', payload)

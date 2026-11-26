@@ -78,6 +78,7 @@ class myUNet(nn.Module):
     def __init__(self):
         super(myUNet,self).__init__()
         self.stam = None
+        self.pida_da = None
         cnum=16
         self.conv1=convwithactivation(2,cnum,kernel_size=[3,3,3],padding=[1,1,1],stride=[2,1,1],padding_mode='zeros')
         self.conv1_2=convwithactivation4DRSTAR(cnum,cnum,kernel_size=[3,3,3,3],padding=[1,1,1,1],stride=[1,1,1,1])
@@ -110,20 +111,46 @@ class myUNet(nn.Module):
         ##output
         self.conv8=upconvwithactivation(1*cnum,1,kernel_size=[3,3,3,3],stride=[1,1,1,1],padding=[1,1,1,1],scale_factor=[1,2,1,1],ifrelu=0)
 
+    def train(self, mode=True):
+        super().train(mode)
+        if mode and self.pida_da is not None and self.pida_da.fusion == 'residual':
+            for child in self.children():
+                if child is not self.pida_da:
+                    child.eval()
+        return self
+
+    def _encode_to_conv3(self, x):
+        x = self.conv1(x)
+        x = self.conv1_3(self.conv1_2(x)) + x
+        x1 = self.conv2(x)
+        x1 = self.conv2_3(self.conv2_2(x1)) + x1
+        return x, x1, self.conv3(x1)
+
+    def _refine_conv3(self, features):
+        return self.conv3_3(self.conv3_2(features)) + features
+
+    def _prior_features(self, x):
+        prior = torch.cat((torch.zeros_like(x[:, :1]), x[:, 1:2]), dim=1)
+        _, _, key = self._encode_to_conv3(prior)
+        return key, self._refine_conv3(key)
+
     def forward(self,x):
-        x=self.conv1(x)
-        x=self.conv1_3(self.conv1_2(x))+x
-        x1=self.conv2(x)
-        x1=self.conv2_3(self.conv2_2(x1))+x1
-        x2=self.conv3(x1)
-        x2=self.conv3_3(self.conv3_2(x2))+x2
+        source = x
+        x, x1, query = self._encode_to_conv3(x)
+        x2 = self._refine_conv3(query)
         x3=self.conv4(x2)
         x3=self.conv4_3(self.conv4_2(x3))+x3
         
         if self.stam is not None:
             x3 = self.stam(x3)
         x3=self.conv5(x3)
-        x3=self.conv5_3(self.conv5_2(torch.cat([x3,x2],dim=1)))+x3
+        if self.pida_da is None:
+            skip = (x3, x2)
+        else:
+            key, value = self._prior_features(source)
+            aligned = self.pida_da.forward_volume(query, key, value, x3)
+            skip = (x3, x2 + aligned) if self.pida_da.fusion == 'residual' else (x3, x2, aligned)
+        x3=self.conv5_3(self.conv5_2(torch.cat(skip,dim=1)))+x3
         x3=self.conv6(x3)
         x3=self.conv6_3(self.conv6_2(torch.cat([x3,x1],dim=1)))+x3
         x3=self.conv7(x3)

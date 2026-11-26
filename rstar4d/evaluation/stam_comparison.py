@@ -33,11 +33,18 @@ def _paired_case(candidate, reference):
     phases = [(x['mae'] - y['mae']) for x, y in zip(a['phases'], b['phases'])
               if x['mae'] is not None and y['mae'] is not None]
     motion = [entry['motion']['absolute_error_ml'] for entry in (a, b)]
-    return {
+    result = {
         'boundary_mae': float(np.mean(phases)) if phases else None,
         'boundary_phases': len(phases),
         'motion_error_ml': motion[0] - motion[1] if all(value is not None for value in motion) else None,
     }
+    for metric in ('mae', 'ssim'):
+        values = [row.get('regions', {}).get('global', {}).get('prediction', {}).get(metric)
+                  for row in (candidate, reference)]
+        result[f'global_{metric}'] = values[0] - values[1] if None not in values else None
+    seconds = [row.get('inference_seconds') for row in (candidate, reference)]
+    result['inference_seconds'] = seconds[0] - seconds[1] if None not in seconds else None
+    return result
 
 
 def compare_stam(candidates, references, seeds, motion_tolerance_ml=0.):
@@ -45,6 +52,7 @@ def compare_stam(candidates, references, seeds, motion_tolerance_ml=0.):
         raise ValueError('Supply one candidate and reference per distinct seed')
     if not np.isfinite(motion_tolerance_ml) or motion_tolerance_ml < 0:
         raise ValueError('Motion tolerance must be finite and nonnegative')
+    metrics = ('boundary_mae', 'motion_error_ml', 'global_mae', 'global_ssim', 'inference_seconds')
     per_animal = defaultdict(dict)
     protocol = fixed_sources = None
     for seed, cand, ref in zip(seeds, candidates, references):
@@ -67,14 +75,14 @@ def compare_stam(candidates, references, seeds, motion_tolerance_ml=0.):
                 'boundary_phases': sum(row['boundary_phases'] for row in scans),
                 'motion_scans': sum(row['motion_error_ml'] is not None for row in scans),
             }
-            for metric in ('boundary_mae', 'motion_error_ml'):
+            for metric in metrics:
                 values = [row[metric] for row in scans if row[metric] is not None]
                 per_animal[animal][str(seed)][metric] = float(np.mean(values)) if values else None
 
     rng = np.random.default_rng(2026)
     animal_rows = {animal: {'seeds': by_seed} for animal, by_seed in sorted(per_animal.items())}
     summary = {}
-    for metric in ('boundary_mae', 'motion_error_ml'):
+    for metric in metrics:
         for row in animal_rows.values():
             values = [entry[metric] for entry in row['seeds'].values()]
             row[metric] = float(np.mean(values)) if all(value is not None for value in values) else None
@@ -84,7 +92,7 @@ def compare_stam(candidates, references, seeds, motion_tolerance_ml=0.):
             samples = rng.choice(values, size=(10000, len(values)), replace=True)
             interval = np.quantile(samples.mean(axis=1), [.025, .975]).tolist()
         summary[metric] = {'mean_delta': float(values.mean()) if len(values) else None,
-                           'paired_animals': len(values), 'improved_animals': int((values < 0).sum()),
+                           'paired_animals': len(values), 'improved_animals': int((values > 0 if metric == 'global_ssim' else values < 0).sum()),
                            'animal_bootstrap_95_interval': interval}
     boundary = summary['boundary_mae']['mean_delta']
     motion = summary['motion_error_ml']['mean_delta']

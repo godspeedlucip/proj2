@@ -19,6 +19,7 @@ def train_defaults():
         'accumulation':1,'clip_grad':None,'temporal_roll':False,'init_weights':None,
         'stam':{'mode':'off','train_policy':'frozen','sam_checkpoint':None,
                 'warmup_epochs':10,'backbone_lr_ratio':.1,'z_chunk_size':1,'activation_checkpointing':True},
+        'pida_da':{'enabled':False,'query_chunk_size':256,'plane_batch_size':4,'train_policy':'stam'},
         'stage2_start_epoch':1,'stage2_include_initial':False}
 
 
@@ -87,6 +88,7 @@ def validate_train(cfg, stage=None):
             raise ValueError('stam.warmup_epochs must be between 1 and Stage II epochs minus 1')
     else:
         stam['warmup_epochs'] = 0
+    validate_pida(cfg['pida_da'], stam['mode'], stage)
     start = cfg['stage2_start_epoch']
     if type(start) is not int or not 1 <= start <= cfg['epochs']['2']:
         raise ValueError('stage2_start_epoch must be inside the Stage II epoch budget')
@@ -95,6 +97,20 @@ def validate_train(cfg, stage=None):
     if (start != 1 or cfg['stage2_include_initial']) and stam['mode'] != 'off':
         raise ValueError('Stage II control options require stam.mode=off')
     return cfg
+
+
+def validate_pida(config, stam_mode, stage):
+    if type(config['enabled']) is not bool:
+        raise ValueError('pida_da.enabled must be a boolean')
+    for key in ('query_chunk_size', 'plane_batch_size'):
+        if type(config[key]) is not int or config[key] < 0:
+            raise ValueError(f'pida_da.{key} must be a nonnegative integer')
+    if config['train_policy'] not in ('stam', 'pida_only'):
+        raise ValueError('Unknown pida_da.train_policy')
+    if config['enabled'] and (stage not in (None, 2) or stam_mode != 'joint'):
+        raise ValueError('pida_da.enabled requires Stage II and stam.mode=joint')
+    if config['train_policy'] == 'pida_only' and not config['enabled']:
+        raise ValueError('pida_da.train_policy=pida_only requires pida_da.enabled')
 
 
 def load_config(path=None,kind='train'):

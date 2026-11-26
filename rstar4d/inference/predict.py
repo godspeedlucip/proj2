@@ -33,6 +33,7 @@ def predict_manifest(checkpoint,manifest,out,split_name='test',mode='tiled',tile
     if not all(k in ck for k in ['stage','model_profile','normalization','intensity_domain']): raise ValueError('Checkpoint lacks inference contracts')
     model = model_from_checkpoint(ck).to(dev)
     stam_structure = ck.get('stam', {}).get('architecture', {'mode': 'off'})
+    pida_structure = ck.get('pida_da', {'enabled': False})
     rows=validate_manifest(manifest,require_target=False)
     split_hash = None
     if split_name!='all':
@@ -56,7 +57,11 @@ def predict_manifest(checkpoint,manifest,out,split_name='test',mode='tiled',tile
             inference_seconds = time.perf_counter() - start
             output_meta={**meta,'inference':{'mode':mode,'tile':list(tile),'overlap':list(overlap),'stage':ck['stage'],
                 'model_profile':ck['model_profile'],'checkpoint_sha256':checkpoint_sha,'source_sha256':row['sha256'],
-                'stam':stam_structure,'split_name':split_name,'split_hash':split_hash,
+                'stam':stam_structure,'pida_da':pida_structure,'split_name':split_name,'split_hash':split_hash,
+                'parent_checkpoint_sha256':ck.get('parent_checkpoint_sha256'),
+                'prior_mode':meta.get('prior_mode', 'unspecified'),
+                'reference_search_domain':('full_plane' if mode == 'full' else 'within_tile_plane')
+                                           if pida_structure['enabled'] else None,
                 'precision':'amp' if amp and dev.type == 'cuda' else 'fp32','seconds':inference_seconds}}
             with h5py.File(temp,'w') as dest:
                 dest.create_dataset('prediction',data=predicted,chunks=(1,min(predicted.shape[1],16),min(predicted.shape[2],128),min(predicted.shape[3],128)),compression='gzip',compression_opts=1)
@@ -73,6 +78,7 @@ def predict_manifest(checkpoint,manifest,out,split_name='test',mode='tiled',tile
         record={'case_id':row['case_id'],'animal_id':row['animal_id'],'path':path.relative_to(out).as_posix(),
             'sha256':sha256(path),'source_sha256':row['sha256'],'checkpoint_sha256':checkpoint_sha,
             'source_metadata_hash':canonical_hash(meta),'mode':mode,'stam_mode':stam_structure['mode'],
+            'pida_da_enabled':pida_structure['enabled'],
             'split_hash':split_hash,'inference_seconds':inference_seconds}
         records.append(record); atomic_jsonl(out/'manifest.jsonl',records)
         print(json.dumps({'case_id':row['case_id'],'prediction':str(path)},ensure_ascii=False),flush=True)

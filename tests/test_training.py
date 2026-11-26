@@ -239,4 +239,90 @@ class TrainingTests(unittest.TestCase):
             self.assertAlmostEqual(events[-1]['lr'], .0000075)
             self.assertEqual(events[-1]['steps'], cfg['steps_per_epoch']['2'])
 
+class PIDATrainingTests(unittest.TestCase):
+    def test_paired_training_and_resume(self):
+        from rstar4d.data.contracts import snapshot, validate_manifest, validate_split
+        from rstar4d.models import create_model, model_from_checkpoint
+        from rstar4d.models.stam import architecture
+        from rstar4d.models.pida_da import is_pida_parameter
+        from rstar4d.training.checkpoint import atomic_save
+        from rstar4d.utils.io import read_jsonl, sha256
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, manifest, split_path = inputs(root)
+            rows = validate_manifest(manifest)
+            split = validate_split(rows, split_path)
+            config['stam'].update(mode='joint', train_policy='joint_after_warmup',
+                                  warmup_epochs=1, sam_checkpoint='unavailable.pth')
+            config['steps_per_epoch']['2'] = 1
+            config['milestones']['2'] = [1]
+            torch.manual_seed(2026)
+            parent_model = create_model(2, stam=config['stam'])
+            torch.nn.init.normal_(parent_model.stam.output_projection.weight, std=.01)
+            parent = root/'old-stam.pt'
+            payload = {
+                'schema_version': 1, 'checkpoint_kind': 'weights', 'stage': 2,
+                'model_profile': 'official_v1', 'state_dict': parent_model.state_dict(),
+                'stam': {'architecture': architecture('joint'), 'sam_source': {'sha256': 'fixture'}},
+                'normalization': config['normalization'], 'intensity_domain': 'mu',
+                'calibration_application': 'none', 'split': split, 'data_snapshot': snapshot(rows, split),
+            }
+            atomic_save(parent, payload)
+            init = {'path': parent, 'source_stage': 2, 'kind': 'stam'}
+            control = train(config, manifest, split, root/'control', 2, init=init)
+            control_last = load_checkpoint(control['last'])
+            self.assertEqual(control_last['step'], 2)
+            self.assertIsNone(model_from_checkpoint(control_last).pida_da)
+
+            for policy in ('stam', 'pida_only'):
+                with self.subTest(policy=policy):
+                    config['pida_da'].update(enabled=True, train_policy=policy)
+                    fresh = root/f'{policy}-full'
+                    resumed = root/f'{policy}-resumed'
+                    run = train(config, manifest, split, fresh, 2, init=init)
+                    first = train(config, manifest, split, resumed, 2, init=init, stop_after_epoch=1)
+                    first_last = load_checkpoint(first['last'])
+                    self.assertEqual(first_last['step'], 1)
+                    self.assertEqual(first_last['stam']['param_groups'],
+                                     ['stam', 'pida_da'] if policy == 'stam' else ['pida_da'])
+                    train(first_last['config'], manifest, split, resumed, 2, resume=first['last'])
+                    expected, actual = load_checkpoint(run['last']), load_checkpoint(first['last'])
+                    self.assertEqual(actual['step'], 2)
+                    self.assertEqual(actual['parent_checkpoint_sha256'], sha256(parent))
+                    self.assertNotEqual(actual['run_id'], control_last['run_id'])
+                    self.assertEqual(actual['scheduler'], expected['scheduler'])
+                    self.assertEqual(actual['best'], expected['best'])
+                    self.assertEqual(load_checkpoint(run['checkpoint'])['best'],
+                                     load_checkpoint(first['checkpoint'])['best'])
+                    self.assertEqual(actual['stam']['param_groups'],
+                                     ['stam', 'pida_da', 'backbone'] if policy == 'stam' else ['pida_da'])
+                    for name, weight in actual['state_dict'].items():
+                        self.assertTrue(torch.equal(weight, expected['state_dict'][name]), name)
+                        if name.startswith('stam.sam.') or (policy == 'pida_only' and not is_pida_parameter(name)):
+                            self.assertTrue(torch.equal(weight, payload['state_dict'][name]), name)
+                    for group, state in actual['optimizer']['state'].items():
+                        for key, value in state.items():
+                            self.assertTrue(torch.equal(value, expected['optimizer']['state'][group][key]))
+                    model = model_from_checkpoint(actual).train()
+                    self.assertEqual(model.pida_da.fusion, 'concat' if policy == 'stam' else 'residual')
+                    if policy == 'pida_only':
+                        self.assertTrue(all(not child.training for child in model.children()
+                                            if child is not model.pida_da))
+                    sequence = [entry['sample_sequence_sha256'] for entry in read_jsonl(resumed/'train.jsonl')
+                                if entry['event'] == 'epoch']
+                    expected_sequence = [entry['sample_sequence_sha256']
+                                         for entry in read_jsonl(root/'control/train.jsonl')
+                                         if entry['event'] == 'epoch']
+                    self.assertEqual(sequence, expected_sequence)
+            with self.assertRaisesRegex(ValueError, 'Parent STAM split'):
+                train(config, manifest, {'train':['b'], 'val':['a'], 'test':['c']}, root/'bad-split', 2, init=init)
+            for change, error in (({'data_snapshot': None}, 'data_snapshot'),
+                                  ({'stam': None}, 'stam.mode=joint'),
+                                  ({'state_dict': {}}, 'state_dict failed strict loading')):
+                atomic_save(parent, dict(payload, **change))
+                with self.assertRaisesRegex(ValueError, error):
+                    train(config, manifest, split, root/'bad-parent', 2, init=init)
+
+
 if __name__=='__main__': unittest.main()
