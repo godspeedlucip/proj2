@@ -1,0 +1,2 @@
+# Keep Python source fingerprints stable across platforms.
+*.py text eol=lf

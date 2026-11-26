@@ -1,0 +1,117 @@
+{
+  "frozen": {
+    "steps": 2,
+    "policy": "frozen",
+    "device": "cuda",
+    "alpha": 0.0,
+    "groups": [
+      "decnn"
+    ],
+    "frozen_tensors_exact": 262,
+    "decnn_parameters_changed": 128,
+    "resume_exact": true,
+    "boundary_policies": [
+      "frozen",
+      "frozen"
+    ],
+    "new_process_max_abs": 0.0
+  },
+  "scratch_stage2": {
+    "steps": 3,
+    "policy": "random_joint",
+    "device": "cpu",
+    "alpha": 0.0,
+    "groups": [
+      "decnn",
+      "backbone",
+      "stam",
+      "sam",
+      "alpha"
+    ],
+    "resume_exact": true,
+    "boundary_policies": [
+      "random_joint",
+      "random_joint"
+    ],
+    "new_process_max_abs": 1.1175870895385742e-08
+  },
+  "tetris": {
+    "steps": 3,
+    "policy": "random_joint",
+    "device": "cpu",
+    "alpha": 0.0,
+    "groups": [
+      "decnn",
+      "backbone",
+      "stam",
+      "sam",
+      "alpha"
+    ],
+    "resume_exact": true,
+    "boundary_policies": [
+      "stage1",
+      "random_joint"
+    ],
+    "new_process_max_abs": 3.725290298461914e-09
+  },
+  "warmup_unfreeze": {
+    "steps": 3,
+    "policy": "unfrozen",
+    "device": "cuda",
+    "alpha": 0.0007427707314491272,
+    "groups": [
+      "decnn",
+      "backbone",
+      "stam",
+      "alpha"
+    ],
+    "frozen_tensors_exact": 14,
+    "resume_exact": true,
+    "boundary_policies": [
+      "preheat",
+      "unfrozen"
+    ],
+    "new_process_max_abs": 0.0
+  },
+  "parity": {
+    "upstream_checkpoint_sha256": "3986f7b21e05a217c18e1a5cbc519768561ff3eae9327b86df6fc9fac7ab04ae",
+    "phase_labels": [
+      9,
+      1,
+      7,
+      3,
+      4,
+      2,
+      5,
+      8,
+      6,
+      11,
+      10
+    ],
+    "unit": "mm^-1",
+    "upstream_phase_max_abs": [
+      1.4901161193847656e-08,
+      1.4901161193847656e-08,
+      1.4901161193847656e-08,
+      1.4901161193847656e-08,
+      1.862645149230957e-08,
+      1.862645149230957e-08,
+      1.4901161193847656e-08,
+      1.4901161193847656e-08,
+      1.862645149230957e-08,
+      1.4901161193847656e-08,
+      1.4901161193847656e-08
+    ],
+    "alpha_0_max_abs": 0.0,
+    "alpha_0.35_max_abs": 0.0,
+    "alpha_1_max_abs": 0.0
+  },
+  "calibration": {
+    "R": 0.1,
+    "S": 0.1
+  },
+  "engineering_decision": "combination_supported",
+  "engineering": true,
+  "regressions_passed": 11,
+  "upstream_revision": "57d61544a0929d56307eda0e5d0edde8ce245105"
+}

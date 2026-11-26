@@ -1,0 +1,23 @@
+{
+  "case_id": "phantom_0",
+  "shape": [
+    16,
+    32,
+    32
+  ],
+  "prior_max_abs": 0.0,
+  "gated_phase_max_abs": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "stored_prior_sha256": "b3795cd2b0bd70f5d1dfde807724620a041213280f7a264d1d46b4a0ccec1d14",
+  "replayed_prior_sha256": "10c855360b3603712d07621465222f9e2eb571ce8f33851a94f92c8320bb04f1"
+}

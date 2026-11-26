@@ -1,0 +1,30 @@
+{
+  "shape_tzyx": [
+    11,
+    467,
+    256,
+    256
+  ],
+  "phase_labels": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+  ],
+  "unit": "mm^-1",
+  "mode_a_s": "phase_weighted_fdk",
+  "mode_a_d": "all_views_fdk",
+  "paired_sha256": "35218b2ff0a93a586767742019827a15df6c25666b2572a8b5f7dbff8a90d2ec",
+  "projections_sha256": "00e3c70fbc0bddf0b66135b451f1dfe5a9c8b3f92f4354b9192023d32aa04515",
+  "ad_sha256": "1a0dd3ebeda11a5a0f5340b8223b1aad5115dcb743147585c2f6b36fe73b654a",
+  "prior_mae": 9.03694785622437e-09,
+  "prior_max_abs": 7.078051567077637e-08,
+  "full_paired_training_cohort": false
+}

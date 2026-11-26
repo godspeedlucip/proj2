@@ -1,0 +1,41 @@
+recipe: frozen
+device: cuda
+amp: true
+deterministic: false
+threads: 4
+seed: 2026
+engineering: false
+model_profile: official_v1
+backbone_checkpoint: null  # Set the trained pig Stage II Joint STAM checkpoint.
+prior_mode: phase_weighted_fdk
+decnn_prior: all_views
+transform:
+  scale: 0.02
+  offset: 0.02
+  physical_range: [-0.02, 0.10]
+  unit: mm^-1
+  source: "Provisional pig attenuation range. Register the approved protocol or training-only calibration before running."
+upsampling: nearest
+alpha: 0.0
+decnn_mse_weight: 1.0
+stam: {mode: joint, z_chunk_size: 1, activation_checkpointing: true}
+loss: {kind: public_code, ssim_weight: 0.1}
+learning_rates: {decnn: 0.00015, backbone: 0.000015, stam: 0.00015, sam: 0.000015, alpha: 0.001}
+milestones: [1000, 2000, 2500]
+gamma: 0.5
+steps: 3000
+stage1_steps: 0
+warmup_steps: 0
+stage1_patch: [1, 128, 128]
+stage2_patches: [[16, 128, 128], [32, 96, 96], [64, 64, 64]]
+phase_batch: 1
+decnn_recompute: true
+flips: true
+checkpoint_every: 100
+validation_every: 100
+validation_inference:
+  mode: tiled
+  backbone_tile: [16, 96, 96]
+  backbone_overlap: [8, 48, 48]
+  decnn_tile: [16, 96, 96]
+  decnn_overlap: [0, 48, 48]

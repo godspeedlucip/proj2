@@ -1,0 +1,334 @@
+{
+  "environment": {
+    "python": "3.9.23",
+    "platform": "Windows-10-10.0.19045-SP0",
+    "versions": {
+      "torch": "2.3.1+cu118",
+      "numpy": "1.26.3",
+      "scipy": "1.13.1",
+      "h5py": "3.14.0",
+      "nibabel": "5.2.1",
+      "tifffile": "2024.8.30",
+      "pytorch-msssim": "1.0.0",
+      "pytigre": "3.0.0"
+    },
+    "cuda": "11.8",
+    "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER"
+  },
+  "engineering": true,
+  "seed": 2026,
+  "training": [
+    {
+      "shape_zyx": [
+        16,
+        128,
+        128
+      ],
+      "phase_count": 11,
+      "policy": "frozen",
+      "precision": "amp-fp16",
+      "phase_batch": 1,
+      "steps": [
+        {
+          "seconds": 0.5573505000000001,
+          "initial_allocated_bytes": 343687680,
+          "peak_allocated_bytes": 1433310720,
+          "peak_reserved_bytes": 1478492160,
+          "loss": 3.6729758083820343,
+          "updated": true,
+          "grad_scale": 512.0
+        },
+        {
+          "seconds": 0.33877490000000066,
+          "initial_allocated_bytes": 1126400512,
+          "peak_allocated_bytes": 1961836032,
+          "peak_reserved_bytes": 2000683008,
+          "loss": 3.4432088434696198,
+          "updated": true,
+          "grad_scale": 512.0
+        }
+      ]
+    },
+    {
+      "shape_zyx": [
+        32,
+        96,
+        96
+      ],
+      "phase_count": 11,
+      "policy": "frozen",
+      "precision": "amp-fp16",
+      "phase_batch": 1,
+      "steps": [
+        {
+          "seconds": 0.47456790000000026,
+          "initial_allocated_bytes": 345620992,
+          "peak_allocated_bytes": 1513641472,
+          "peak_reserved_bytes": 1533018112,
+          "loss": 3.9533421397209167,
+          "updated": true,
+          "grad_scale": 512.0
+        },
+        {
+          "seconds": 0.41001750000000037,
+          "initial_allocated_bytes": 1132888576,
+          "peak_allocated_bytes": 2036891136,
+          "peak_reserved_bytes": 2082471936,
+          "loss": 3.8344923853874207,
+          "updated": true,
+          "grad_scale": 512.0
+        }
+      ]
+    },
+    {
+      "shape_zyx": [
+        64,
+        64,
+        64
+      ],
+      "phase_count": 11,
+      "policy": "frozen",
+      "precision": "amp-fp16",
+      "phase_batch": 1,
+      "steps": [
+        {
+          "seconds": 0.4270120000000013,
+          "initial_allocated_bytes": 343687680,
+          "peak_allocated_bytes": 1436587520,
+          "peak_reserved_bytes": 1478492160,
+          "loss": 3.2485240697860718,
+          "updated": true,
+          "grad_scale": 512.0
+        },
+        {
+          "seconds": 0.3539133000000003,
+          "initial_allocated_bytes": 1126662656,
+          "peak_allocated_bytes": 1960295936,
+          "peak_reserved_bytes": 2000683008,
+          "loss": 2.973025232553482,
+          "updated": true,
+          "grad_scale": 512.0
+        }
+      ]
+    },
+    {
+      "shape_zyx": [
+        16,
+        128,
+        128
+      ],
+      "phase_count": 11,
+      "policy": "random_joint",
+      "precision": "amp-fp16",
+      "phase_batch": 1,
+      "steps": [
+        {
+          "seconds": 0.8808299999999996,
+          "initial_allocated_bytes": 343687680,
+          "peak_allocated_bytes": 5238047744,
+          "peak_reserved_bytes": 6199181312,
+          "loss": 3.242187261581421,
+          "updated": true,
+          "grad_scale": 512.0
+        },
+        {
+          "seconds": 0.7358498000000004,
+          "initial_allocated_bytes": 1256379392,
+          "peak_allocated_bytes": 5850737664,
+          "peak_reserved_bytes": 6744440832,
+          "loss": 3.012619972229004,
+          "updated": true,
+          "grad_scale": 512.0
+        }
+      ]
+    },
+    {
+      "shape_zyx": [
+        32,
+        96,
+        96
+      ],
+      "phase_count": 11,
+      "policy": "random_joint",
+      "precision": "amp-fp16",
+      "phase_batch": 1,
+      "steps": [
+        {
+          "seconds": 0.9361113999999997,
+          "initial_allocated_bytes": 351912448,
+          "peak_allocated_bytes": 5724239872,
+          "peak_reserved_bytes": 6507462656,
+          "loss": 3.8290672302246094,
+          "updated": true,
+          "grad_scale": 512.0
+        },
+        {
+          "seconds": 0.8875545000000002,
+          "initial_allocated_bytes": 1259729920,
+          "peak_allocated_bytes": 6332514304,
+          "peak_reserved_bytes": 7094665216,
+          "loss": 3.41223406791687,
+          "updated": true,
+          "grad_scale": 512.0
+        }
+      ]
+    },
+    {
+      "shape_zyx": [
+        64,
+        64,
+        64
+      ],
+      "phase_count": 11,
+      "policy": "random_joint",
+      "precision": "amp-fp16",
+      "phase_batch": 1,
+      "steps": [
+        {
+          "seconds": 1.027099699999999,
+          "initial_allocated_bytes": 350503424,
+          "peak_allocated_bytes": 5079900672,
+          "peak_reserved_bytes": 5834276864,
+          "loss": 3.915226936340332,
+          "updated": true,
+          "grad_scale": 512.0
+        },
+        {
+          "seconds": 0.9346931999999981,
+          "initial_allocated_bytes": 1255265280,
+          "peak_allocated_bytes": 5684749824,
+          "peak_reserved_bytes": 6559891456,
+          "loss": 3.421429395675659,
+          "updated": true,
+          "grad_scale": 512.0
+        }
+      ]
+    }
+  ],
+  "training_options": {
+    "loss": {
+      "kind": "public_code",
+      "ssim_weight": 0.1
+    },
+    "stam": {
+      "mode": "joint",
+      "z_chunk_size": 1,
+      "activation_checkpointing": true
+    },
+    "decnn_recompute": true,
+    "phase_batch": 1
+  },
+  "fp16_initial_grad_scale": 512,
+  "inference_checkpoint_sha256": "7f500deb507dbe39e1c048bac7b06bd47f9d2df6824e6373241d2ed7f5096c5c",
+  "frozen_source_sha256": "3986f7b21e05a217c18e1a5cbc519768561ff3eae9327b86df6fc9fac7ab04ae",
+  "inference": [
+    {
+      "phases": 10,
+      "shape_zyx": [
+        17,
+        33,
+        35
+      ],
+      "tile_zyx": [
+        16,
+        32,
+        32
+      ],
+      "overlap_zyx": [
+        0,
+        16,
+        16
+      ],
+      "precision": "fp32",
+      "unit": "mm^-1",
+      "measurements": {
+        "full": {
+          "seconds": 0.4695775000000002,
+          "initial_allocated_bytes": 304775680,
+          "peak_allocated_bytes": 404951552,
+          "peak_reserved_bytes": 482344960
+        },
+        "tiled": {
+          "seconds": 1.7328119000000002,
+          "initial_allocated_bytes": 313360896,
+          "peak_allocated_bytes": 363217408,
+          "peak_reserved_bytes": 482344960
+        }
+      },
+      "full_tiled_difference": {
+        "S": {
+          "max_abs": 0.004661405459046364,
+          "mae": 0.0005525994347408414,
+          "center_mae": 0.0005450478638522327,
+          "seam_mae": 0.000530451419763267
+        },
+        "D": {
+          "max_abs": 0.0006949342787265778,
+          "mae": 5.723559661419131e-05,
+          "center_mae": 9.06482273421716e-06,
+          "seam_mae": 0.00015189239638857543
+        },
+        "fused_035": {
+          "max_abs": 0.003031414933502674,
+          "mae": 0.0003579211770556867,
+          "center_mae": 0.00035343371564522386,
+          "seam_mae": 0.0003390879719518125
+        }
+      }
+    },
+    {
+      "phases": 11,
+      "shape_zyx": [
+        17,
+        33,
+        35
+      ],
+      "tile_zyx": [
+        16,
+        32,
+        32
+      ],
+      "overlap_zyx": [
+        0,
+        16,
+        16
+      ],
+      "precision": "fp32",
+      "unit": "mm^-1",
+      "measurements": {
+        "full": {
+          "seconds": 0.32481269999999984,
+          "initial_allocated_bytes": 313360896,
+          "peak_allocated_bytes": 412271616,
+          "peak_reserved_bytes": 482344960
+        },
+        "tiled": {
+          "seconds": 1.9035211999999992,
+          "initial_allocated_bytes": 313360896,
+          "peak_allocated_bytes": 369984000,
+          "peak_reserved_bytes": 482344960
+        }
+      },
+      "full_tiled_difference": {
+        "S": {
+          "max_abs": 0.004865212365984917,
+          "mae": 0.0005595189868472517,
+          "center_mae": 0.0005209624650888145,
+          "seam_mae": 0.0005467258160933852
+        },
+        "D": {
+          "max_abs": 0.0007103141397237778,
+          "mae": 5.730690827476792e-05,
+          "center_mae": 9.221909749612678e-06,
+          "seam_mae": 0.00015256130427587777
+        },
+        "fused_035": {
+          "max_abs": 0.003073801752179861,
+          "mae": 0.00036404471029527485,
+          "center_mae": 0.00033845717553049326,
+          "seam_mae": 0.0003556403098627925
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rstar-decnn"
+version = "0.1.0"
+description = "Parallel 3D DeCNN enhancement for RSTAR-STAM"
+requires-python = ">=3.9"
+dependencies = ["rstar4d-training==0.1.0"]
+
+[tool.setuptools.packages.find]
+include = ["rstar_decnn*"]
