@@ -2,6 +2,20 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import torch
+from ..config import validate_cycn
+
+
+def cycn_settings(checkpoint):
+    """Read the saved architecture, including the distinct center-only graph."""
+    value = checkpoint.get('cycn')
+    if value is None:
+        return validate_cycn(None)
+    if value.get('version') != 1:
+        raise ValueError('Unsupported CycN structure version')
+    settings = {key: item for key, item in value.items() if key != 'version'}
+    if set(settings) != set(validate_cycn(None)):
+        raise ValueError('Incomplete CycN structure metadata')
+    return validate_cycn(settings)
 
 
 def basic_types(value):

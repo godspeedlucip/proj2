@@ -13,12 +13,14 @@ import torch
 from torch.utils.data import DataLoader
 from ..config import validate_train
 from ..models import create_model, forward_volume, initialize_stage2
+from ..models.model import attach_cycn
 from ..data.contracts import validate_manifest, validate_split, snapshot
 from ..data.sampling import PatchDataset, validation_samples
 from ..utils.io import atomic_json, append_jsonl, read_json, canonical_hash, sha256, code_fingerprint, environment
 from ..utils.seed import seed_all, rng_state, restore_rng
 from .losses import compute_loss
-from .checkpoint import atomic_save, load_checkpoint
+from .checkpoint import atomic_save, load_checkpoint, cycn_settings
+from .optimization import build_optimizer, learning_rates
 
 
 def select_device(name):
@@ -44,6 +46,60 @@ def _loader(dataset,config,epoch,stage):
         pin_memory=config['pin_memory'],generator=generator,persistent_workers=False)
 
 
+def _batch_forward(model, x, batch):
+    if getattr(model,'cycn_branch',None) is None:
+        return forward_volume(model,x)
+    return forward_volume(model,x,batch['temporal_topology'],batch['case_id'])
+
+
+def _initial_model(stage, config, init, rows, data):
+    profile = config['model_profile']
+    settings = config['cycn']
+    model = create_model(stage, profile)
+    if init is None:
+        if stage == 2:
+            raise ValueError('Stage II needs init-from-stage1, init-from-stage2, or resume')
+        return attach_cycn(model, settings), {'kind':'random','source_stage':None,'sha256':None}
+    source_stage = int(init['source_stage'])
+    if source_stage not in (1, 2) or (stage == 1 and source_stage != 1):
+        raise ValueError('Invalid initialization stage')
+    path = Path(init['path']).resolve()
+    digest = sha256(path)
+    value = torch.load(path, map_location='cpu', weights_only=True)
+    if digest != sha256(path):
+        raise ValueError('Initialization weights changed during loading')
+    state = value.get('state_dict', value)
+    if value.get('stage', source_stage) != source_stage:
+        raise ValueError('Initialization stage metadata mismatch')
+    meta = rows[0]['metadata']
+    contracts = {'model_profile': profile, 'normalization': config['normalization'],
+                 'intensity_domain': meta['intensity_domain'],
+                 'calibration_application': meta['calibration_application']}
+    if source_stage == 2 and settings['mode'] != 'off' and not all(key in value for key in contracts):
+        raise ValueError('CycN Stage II warm start requires versioned weights with profile and data contracts')
+    for key, expected in contracts.items():
+        if key in value and value[key] != expected:
+            raise ValueError(f'Initialization {key} mismatch')
+    if source_stage == 2 and 'split' in value and value['split'] != data['split']:
+        raise ValueError('Initialization animal split mismatch')
+    if source_stage == 2 and 'data_snapshot' in value and value['data_snapshot'] != data:
+        raise ValueError('Initialization data snapshot mismatch')
+    source_settings = cycn_settings(value)
+    transfer = stage == 2 and source_stage == 1
+    if source_settings['mode'] != 'off':
+        if not transfer or any(source_settings[key] != settings[key] for key in ('mode', 'fusion', 'boundary')):
+            raise ValueError('Enhanced initialization requires matching CycN settings and Stage I to II transfer')
+        attach_cycn(model, settings)
+    if transfer:
+        initialize_stage2(model, state)
+    else:
+        model.load_state_dict(state, strict=True)
+    if source_settings['mode'] == 'off':
+        attach_cycn(model, settings)
+    return model, {'kind':'stage_transfer' if transfer else 'warm_start',
+                   'source_stage':source_stage,'sha256':digest,'path':str(path)}
+
+
 def validate_model(model,records,config,stage,samples,device):
     data=PatchDataset(records,config,stage,0,len(samples),samples)
     cases=defaultdict(lambda:{'sum':0.,'count':0,'animal_id':None})
@@ -51,7 +107,8 @@ def validate_model(model,records,config,stage,samples,device):
     with torch.no_grad():
         for batch in _loader(data,config,0,stage):
             x=batch['input'].to(device); target=batch['target'].to(device); valid=batch['valid'].to(device)
-            with _amp(device,config['amp']): pred=forward_volume(model,x)
+            with _amp(device,config['amp']):
+                pred=_batch_forward(model,x,batch)
             if not torch.isfinite(pred).all(): raise FloatingPointError(f'Nonfinite validation output: {batch["case_id"]}')
             item=cases[batch['case_id'][0]]
             item['sum']+=float((pred.float()-target).abs()[valid].sum())
@@ -81,6 +138,8 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
     if resume and init: raise ValueError('resume and init are mutually exclusive')
     saved=load_checkpoint(resume) if resume else None
     if saved and saved['stage']!=stage: raise ValueError('Checkpoint stage mismatch')
+    if saved and (cycn_settings(saved)!=config['cycn'] or saved['model_profile']!=config['model_profile']):
+        raise ValueError('Resume configuration disagrees with saved model structure or training policy')
     if saved:
         # Migration is supported by moving/copying the whole run, never by injecting
         # one checkpoint into an unrelated destination or losing its historical best.
@@ -105,32 +164,27 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
     data=snapshot(rows,split); sig=signature(config,data)
     if saved and saved['signature']!=sig: raise ValueError('Resume rejected: data, split, algorithm/config or implementation changed; use an explicit warm start')
     device=select_device(config['device']); seed_all(config['seed'],config['deterministic'],config['threads'])
-    model=create_model(stage,config['model_profile']).to(device)
-    initialization={'kind':'random','source_stage':None,'sha256':None}
     if saved:
+        model=create_model(stage,saved['model_profile'],cycn_settings(saved))
         model.load_state_dict(saved['state_dict'],strict=True); initialization=saved['initialization']
     else:
         if init is None and stage==1 and config['init_weights']: init={'path':config['init_weights'],'source_stage':1}
-        if init:
-            value=torch.load(init['path'],map_location='cpu',weights_only=True)
-            state=value.get('state_dict',value)
-            source_stage=int(init['source_stage'])
-            if 'stage' in value and value['stage']!=source_stage: raise ValueError('Initialization stage metadata mismatch')
-            if stage==1 and source_stage!=1: raise ValueError('Stage I requires Stage I initialization')
-            if stage==2 and source_stage==1: initialize_stage2(model,state)
-            else: model.load_state_dict(state,strict=True)
-            initialization={'kind':'stage_transfer' if stage==2 and source_stage==1 else 'warm_start',
-                'source_stage':source_stage,'sha256':sha256(init['path']),'path':str(Path(init['path']).resolve())}
-        elif stage==2: raise ValueError('Stage II needs init-from-stage1, init-from-stage2, or resume')
-    optimizer=torch.optim.Adam([p for p in model.parameters() if p.requires_grad],lr=config['learning_rate'],
-        betas=tuple(config['betas']),weight_decay=config['weight_decay'])
+        model,initialization=_initial_model(stage,config,init,rows,data)
+    model.to(device)
+    optimizer=build_optimizer(model,config)
+    group_names=list(learning_rates(optimizer))
     total_epochs=config['epochs'][str(stage)]
     scheduler=(torch.optim.lr_scheduler.MultiStepLR(optimizer,milestones=config['milestones'][str(stage)],gamma=config['gamma'])
         if config['scheduler']=='multistep' else torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=total_epochs,eta_min=config['min_lr']))
     scaler=torch.cuda.amp.GradScaler(enabled=device.type=='cuda' and config['amp'])
     start_epoch=1; step=0; best=math.inf
     if saved:
+        if saved.get('optimizer_group_names',['backbone'])!=group_names:
+            raise ValueError('Optimizer parameter group order differs from the checkpoint')
         optimizer.load_state_dict(saved['optimizer'])
+        for group,name in zip(optimizer.param_groups,group_names):
+            if group.setdefault('name',name)!=name:
+                raise ValueError('Optimizer state group name differs from the checkpoint')
         scheduler_state=copy.deepcopy(saved['scheduler'])
         if config['scheduler']=='multistep': scheduler_state['milestones']=Counter(scheduler_state['milestones'])
         scheduler.load_state_dict(scheduler_state); scaler.load_state_dict(saved['scaler'])
@@ -159,7 +213,8 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
             for index,batch in enumerate(loader):
                 x=batch['input'].to(device); target=batch['target'].to(device); valid=batch['valid'].to(device)
                 shape_counts['x'.join(map(str,x.shape[2:]))]+=1; animal_counts[batch['animal_id'][0]]+=1
-                with _amp(device,config['amp']): pred=forward_volume(model,x)
+                with _amp(device,config['amp']):
+                    pred=_batch_forward(model,x,batch)
                 loss=compute_loss(pred,target,valid,stage,loss_config)
                 if not torch.isfinite(loss['total']): raise FloatingPointError(f'Nonfinite loss at {batch["case_id"]}, epoch={epoch}, draw={index}')
                 # Average over the actual size of each accumulation group, including the final short group.
@@ -193,16 +248,18 @@ def train(config,manifest,split,run_dir,stage,resume=None,init=None,stop_after_e
             evaluation=validate_model(model,validation,config,stage,samples,device)
             improved=evaluation['l1']<best
             if improved: best=evaluation['l1']
-            lr_used=optimizer.param_groups[0]['lr']; scheduler.step()
+            rates_used=learning_rates(optimizer); lr_used=optimizer.param_groups[0]['lr']; scheduler.step()
             entry={'event':'epoch','epoch':epoch,'stage':stage,'steps':step,'train_l1':total_l1/length,
                 'train_total':total_loss/length,'validation_l1':evaluation['l1'],'validation_animal_l1':evaluation['animal_l1'],
-                'lr':lr_used,'next_lr':optimizer.param_groups[0]['lr'],'seconds':time.perf_counter()-begin,
+                'lr':lr_used,'next_lr':optimizer.param_groups[0]['lr'],'learning_rates':rates_used,
+                'next_learning_rates':learning_rates(optimizer),'seconds':time.perf_counter()-begin,
                 'peak_allocated_gib':torch.cuda.max_memory_allocated(device)/1024**3 if device.type=='cuda' else 0.,
                 'skipped_ssim':skipped,'amp_overflows':amp_overflows,'optimizer_updates':epoch_updates,
                 'sample_count':length,'shape_counts_tzyx':dict(shape_counts),'animal_draw_counts':dict(animal_counts),
                 'valid_fraction':sum(valid_ratios)/len(valid_ratios),'validation_cases':evaluation['cases']}
             payload={'schema_version':1,'checkpoint_kind':'training','run_id':run_id,'state_dict':model.state_dict(),'stage':stage,
                 'model_profile':config['model_profile'],'completed_epoch':epoch,'next_epoch':epoch+1,'step':step,
+                'cycn':{'version':1,**config['cycn']},'optimizer_group_names':group_names,
                 'stage_complete':epoch==total_epochs,'optimizer':optimizer.state_dict(),'scheduler':scheduler.state_dict(),
                 'scaler':scaler.state_dict(),'best':best,'rng':rng_state(),'config':config,'signature':sig,
                 'data_snapshot':data,'validation_samples':samples,'initialization':initialization,

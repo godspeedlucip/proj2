@@ -2,13 +2,15 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from . import official_stage1, official_stage2
+from .cycn import CycNBranch
+from ..config import validate_cycn
 
 
 def is_z_parameter(name):
     return '.conv2.' in name or '.conv2_2.' in name
 
 
-def create_model(stage,profile='official_v1'):
+def create_model(stage,profile='official_v1',cycn=None):
     if stage not in (1,2): raise ValueError('stage must be 1 or 2')
     if profile not in ('official_v1','pig_ordered_v1'): raise ValueError('Unknown model profile')
     model=(official_stage1 if stage==1 else official_stage2).myUNet()
@@ -19,6 +21,15 @@ def create_model(stage,profile='official_v1'):
     if stage==1:
         for name,p in model.named_parameters():
             if is_z_parameter(name): p.requires_grad_(False)
+    return attach_cycn(model,cycn)
+
+
+def attach_cycn(model,config):
+    config=validate_cycn(config)
+    if config['mode']!='off':
+        if getattr(model,'cycn_branch',None) is not None:
+            raise ValueError('CycN already attached')
+        model.cycn_branch=CycNBranch(config,model.conv1.out_ch).to(model.conv1.conv1.weight)
     return model
 
 
@@ -32,7 +43,7 @@ def initialize_stage2(model,state):
             p.requires_grad_(True)
 
 
-def forward_volume(model,x):
+def forward_volume(model,x,temporal_topology=None,case_ids=None):
     if x.ndim!=6 or x.shape[1]!=2: raise ValueError('Expected [B,2,T,Z,Y,X]')
     if x.shape[2]<2: raise ValueError('At least two phases are required')
     b,c,t,z,y,w=x.shape
@@ -40,7 +51,10 @@ def forward_volume(model,x):
     pad=(0,(-w)%8,0,(-y)%8,0,pad_z)
     if any(pad):
         x=F.pad(x.reshape(b,c*t,z,y,w),pad,mode='replicate').reshape(b,c,t,z+pad_z,y+pad[3],w+pad[1])
-    out=model(x.contiguous())
+    if getattr(model,'cycn_branch',None) is None:
+        out=model(x.contiguous())
+    else:
+        out=model(x.contiguous(),temporal_topology=temporal_topology,case_ids=case_ids,cycn_xy_shape=(y,w))
     return out[:,:,:,:z,:y,:w]
 
 

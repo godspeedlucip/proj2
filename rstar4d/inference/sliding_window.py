@@ -22,7 +22,37 @@ def gaussian_weight(shape):
     return np.maximum(weight,1e-4).astype(np.float32)
 
 
-def predict_volume(model,cbct,prior,normalization,mode='tiled',tile=(32,128,128),overlap=(16,64,64),device='cpu',amp=True):
+def spatial_tile_errors(tiled, full, valid, stage, tile, overlap, margin=4):
+    """Compare in the valid FOV near internal tile edges and away from them."""
+    alignment=(1 if stage==1 else 2,8,8)
+    seam=np.zeros(full.shape[1:],dtype=bool)
+    for axis,(length,size,shared,align) in enumerate(zip(seam.shape,tile,overlap,alignment)):
+        if stage==1 and axis==0:
+            continue
+        positions=starts(length,size,shared,align)
+        edges=set(positions[1:]) | {start+size for start in positions[:-1]}
+        for edge in edges:
+            if 0<edge<length:
+                section=[slice(None)]*3
+                section[axis]=slice(max(0,edge-margin),min(length,edge+margin))
+                seam[tuple(section)]=True
+    totals={'seam':[0,0.,0.],'interior':[0,0.,0.]}
+    for index in range(len(full)):
+        difference=np.abs(tiled[index]-full[index])
+        fov=np.asarray(valid[index],dtype=bool)
+        for name,mask in [('seam',fov & seam),('interior',fov & ~seam)]:
+            values=difference[mask]
+            if values.size:
+                totals[name][0]+=values.size
+                totals[name][1]+=float(values.sum(dtype=np.float64))
+                totals[name][2]=max(totals[name][2],float(values.max()))
+    return {'margin_voxels':margin,**{
+        name:{'voxels':count,'mae':total/count if count else None,'max_abs':peak if count else None}
+        for name,(count,total,peak) in totals.items()}}
+
+
+def predict_volume(model,cbct,prior,normalization,mode='tiled',tile=(32,128,128),overlap=(16,64,64),device='cpu',amp=True,
+                   temporal_topology=None,case_id=None):
     if len(cbct.shape)!=4 or prior.shape!=cbct.shape[1:]: raise ValueError('Expected matching TZYX CBCT and ZYX prior')
     model.eval(); device=torch.device(device)
     t,z,y,x=cbct.shape; scale=normalization['scale']; offset=normalization['offset']
@@ -32,7 +62,7 @@ def predict_volume(model,cbct,prior,normalization,mode='tiled',tile=(32,128,128)
         inp=np.stack([(c+offset)/scale,np.broadcast_to((p+offset)/scale,c.shape)])
         tensor=torch.from_numpy(np.ascontiguousarray(inp)).unsqueeze(0).to(device)
         autocast=torch.cuda.amp.autocast() if device.type=='cuda' and amp else contextlib.nullcontext()
-        with torch.no_grad(),autocast: output=forward_volume(model,tensor)
+        with torch.no_grad(),autocast: output=forward_volume(model,tensor,temporal_topology,case_id)
         if not torch.isfinite(output).all(): raise FloatingPointError('Nonfinite prediction')
         return output[0,0].float().cpu().numpy()
     if mode=='full':

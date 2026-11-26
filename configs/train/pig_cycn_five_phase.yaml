@@ -1,0 +1,23 @@
+# Public notebook algorithm; explicit pig normalization and smaller spatial patches.
+device: cuda
+amp: true
+model_profile: official_v1
+epochs: {'1': 60, '2': 30}
+learning_rate: 0.00015
+milestones: {'1': [20, 30, 40], '2': [10, 20, 25]}
+scheduler: multistep
+gamma: 0.5
+loss: {kind: public_code, ssim_weight: 0.1}
+normalization: {scale: 0.02, offset: 0.0}
+stage1_patch: [1, 256, 256]
+stage2_patches: [[16, 128, 128], [32, 96, 96], [64, 64, 64]]
+small_volume: error
+workers: 0
+seed: 2026
+cycn:
+  mode: five_phase
+  fusion: xy_pre_z
+  boundary: from_metadata
+  train_policy: joint
+  backbone_lr_ratio: 0.1
+  z_chunk: 8

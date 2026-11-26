@@ -1,5 +1,7 @@
 # RSTAR4D 完整训练工程
 
+五相、中心复制、主干配对及冻结训练的配方、运行方法和验收记录见 [CycN 训练与验收](docs/cycn-training.md)。
+
 本工程以公开Notebook为算法依据：原网络/state_dict、circular时间填充、Stage I跳过z、Stage II原Dirac/零初始化、L1＋0.1×(1−SSIM)、Adam 1.5e-4、60/30轮及原分段学习率。原Notebook和权重保留在 `RSTAR/githubcode/`。
 
 猪数据使用TIGRE；HU→mu、几何偏移、FDK、padding、FOV和有效掩膜沿用用户生成代码，副本及SHA256记录在 `rstar4d/provenance.json`。运行时不依赖工作区外的Python脚本。猪域强度固定除以0.02、16GB配置缩小空间块，均为明确适配。当前默认prior按公开MATLAB的相位视角数加权FDK；`prior_mode: all_views_fdk`可选，对应用户原prior生成方式。两种prior均只使用动态混合投影。

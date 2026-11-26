@@ -30,10 +30,17 @@ def parser():
             d.add_argument('--stage',type=int,choices=[1,2]); d.add_argument('--stop-after-epoch',type=int)
             group=d.add_mutually_exclusive_group(); group.add_argument('--resume'); group.add_argument('--init-from-stage1'); group.add_argument('--init-from-stage2')
     d=sub.add_parser('infer'); d.add_argument('--checkpoint',required=True); d.add_argument('--manifest',required=True); d.add_argument('--out',required=True)
+    d.add_argument('--compare-full',action='store_true',help='Measure tiled vs full prediction differences and resource use')
     d.add_argument('--split'); d.add_argument('--split-name',choices=['train','val','test','all'],default='test'); d.add_argument('--mode',choices=['full','tiled'],default='tiled')
     d.add_argument('--tile',nargs=3,type=int,default=[32,128,128]); d.add_argument('--overlap',nargs=3,type=int,default=[16,64,64]); d.add_argument('--device',default='cuda'); d.add_argument('--fp32',action='store_true'); d.add_argument('--export',nargs='+',choices=['h5','tif','nii'],default=['h5'])
     d=sub.add_parser('evaluate'); d.add_argument('--predictions',required=True); d.add_argument('--manifest',required=True); d.add_argument('--metric-config'); d.add_argument('--projection',action='store_true'); d.add_argument('--out',required=True)
+    d.add_argument('--lv-annotations'); d.add_argument('--lv-extractor'); d.add_argument('--lv-device',default='cpu')
+    d=sub.add_parser('compare-cycn'); d.add_argument('--out',required=True)
+    for arm in ('a','b','c','d'): d.add_argument(f'--{arm}',required=True)
+    d.add_argument('--seed',type=int,default=2026); d.add_argument('--motion-tolerance-ml',type=float,default=0.)
+    d.add_argument('--motion-tolerance-source')
     d=sub.add_parser('benchmark'); d.add_argument('--config'); d.add_argument('--stage',type=int,choices=[1,2],default=2); d.add_argument('--phase-count',type=int,default=11); d.add_argument('--steps',type=int,default=2); d.add_argument('--weights'); d.add_argument('--out')
+    d.add_argument('--temporal-topology',choices=['cyclic','ordered_states'])
     return p
 
 
@@ -58,43 +65,82 @@ def doctor(skip_tigre=False):
     return result
 
 
-def benchmark(config,stage,t,steps,weights=None):
+def benchmark(config,stage,t,steps,weights=None,temporal_topology=None):
     from .models import create_model, forward_volume, initialize_stage2
+    from .models.model import attach_cycn
+    from .training.checkpoint import cycn_settings
+    from .training.optimization import build_optimizer, learning_rates
     from .training.trainer import select_device
     from .training.losses import compute_loss
     from .utils.seed import seed_all
     if steps<1 or t<2: raise ValueError('Positive steps and at least two phases required')
+    if config['cycn']['mode']!='off' and temporal_topology is None:
+        raise ValueError('CycN benchmark requires --temporal-topology')
     device=select_device(config['device']); results=[]
     patches=[config['stage1_patch']] if stage==1 else config['stage2_patches']
     for patch in patches:
         seed_all(config['seed'],config['deterministic'],config['threads'])
-        model=create_model(stage,config['model_profile']).to(device)
+        model=create_model(stage,config['model_profile'])
+        source_settings=None
         if weights:
-            value=torch.load(weights,map_location='cpu',weights_only=True); model.load_state_dict(value.get('state_dict',value),strict=True)
+            value=torch.load(weights,map_location='cpu',weights_only=True)
+            if value.get('stage',stage)!=stage or value.get('model_profile',config['model_profile'])!=config['model_profile']:
+                raise ValueError('Benchmark weights stage/profile mismatch')
+            source_settings=cycn_settings(value)
+            if source_settings['mode']!='off':
+                if any(source_settings[key]!=config['cycn'][key] for key in ('mode','fusion','boundary')):
+                    raise ValueError('Benchmark weights CycN architecture mismatch')
+                attach_cycn(model,config['cycn'])
+            model.load_state_dict(value.get('state_dict',value),strict=True)
         elif stage==2: initialize_stage2(model,create_model(1,config['model_profile']).state_dict())
-        optimizer=torch.optim.Adam([p for p in model.parameters() if p.requires_grad],lr=config['learning_rate'])
+        if source_settings is None or source_settings['mode']=='off':
+            attach_cycn(model,config['cycn'])
+        model.to(device)
+        optimizer=build_optimizer(model,config)
         scaler=torch.cuda.amp.GradScaler(enabled=device.type=='cuda' and config['amp'])
+        # Match the synthetic tensor stream across groups even when model assembly draws extra RNG.
+        seed_all(config['seed']+1,config['deterministic'],config['threads'])
         x=torch.rand(1,2,t,*patch,device=device); target=torch.rand(1,1,t,*patch,device=device); valid=torch.ones_like(target,dtype=torch.bool)
-        before=model.conv1.conv1.weight.detach().clone()
-        if device.type=='cuda': torch.cuda.reset_peak_memory_stats(device)
+        tracked={'backbone':model.conv1.conv1.weight}
+        if getattr(model,'cycn_branch',None) is not None:
+            tracked['cycn']=model.cycn_branch.fuse.weight
+        before={name:parameter.detach().clone() for name,parameter in tracked.items()}
+        if device.type=='cuda':
+            torch.cuda.synchronize(device)
+            torch.cuda.reset_peak_memory_stats(device)
         start=time.perf_counter(); loss_value=None
-        for i in range(steps):
+        updates=0; overflows=0
+        while updates<steps and overflows<8:
             optimizer.zero_grad(set_to_none=True)
             ctx=torch.cuda.amp.autocast() if device.type=='cuda' and config['amp'] else contextlib.nullcontext()
-            with ctx: pred=forward_volume(model,x)
+            with ctx: pred=forward_volume(model,x,temporal_topology,'synthetic benchmark')
             loss=compute_loss(pred,target,valid,stage,config['loss'])['total']
             if not torch.isfinite(loss): raise FloatingPointError('Nonfinite benchmark loss')
-            scaler.scale(loss).backward(); scaler.step(optimizer); scaler.update(); loss_value=float(loss.detach())
+            scaler.scale(loss).backward()
+            if not scaler.is_enabled() and any(p.grad is not None and not torch.isfinite(p.grad).all() for p in model.parameters()):
+                raise FloatingPointError('Nonfinite benchmark FP32 gradient')
+            scale=scaler.get_scale()
+            scaler.step(optimizer); scaler.update(); loss_value=float(loss.detach())
+            if scaler.get_scale()<scale: overflows+=1
+            else: updates+=1
+            del pred,loss
         if device.type=='cuda': torch.cuda.synchronize(device)
-        changed=not torch.equal(before,model.conv1.conv1.weight)
-        if not changed: raise RuntimeError('Benchmark made no parameter update (AMP overflow); use --weights or explicit fp32 config')
-        results.append({'shape':[1,2,t,*patch],'steps':steps,'seconds':time.perf_counter()-start,'parameter_update':changed,
+        seconds=time.perf_counter()-start
+        changed={name:not torch.equal(before[name],parameter) for name,parameter in tracked.items()}
+        rates=learning_rates(optimizer)
+        if updates!=steps or any(updated!=(name in rates) for name,updated in changed.items()):
+            raise RuntimeError('Benchmark failed to make the expected effective parameter updates')
+        results.append({'shape':[1,2,t,*patch],'steps':steps,'seconds':seconds,'parameter_update':any(changed.values()),
+            'groups_updated':changed,'learning_rates':rates,'optimizer_updates':updates,'amp_overflows':overflows,
+            'seconds_per_effective_update':seconds/updates,
             'loss':loss_value,'peak_allocated_gib':torch.cuda.max_memory_allocated(device)/1024**3 if device.type=='cuda' else None,
             'peak_reserved_gib':torch.cuda.max_memory_reserved(device)/1024**3 if device.type=='cuda' else None})
-        del model,optimizer,scaler,x,target,valid,before,pred,loss
+        del model,optimizer,scaler,x,target,valid,before,tracked
         gc.collect()
         if device.type=='cuda': torch.cuda.empty_cache()
-    return {'environment':environment(),'stage':stage,'model_profile':config['model_profile'],'config':config,'results':results}
+    return {'environment':environment(),'stage':stage,'model_profile':config['model_profile'],
+            'temporal_topology':temporal_topology,'weights_sha256':sha256(weights) if weights else None,
+            'config':config,'results':results}
 
 
 def dispatch(args):
@@ -156,15 +202,21 @@ def dispatch(args):
     if command=='infer':
         from .inference.predict import predict_manifest
         return {'manifest':str(predict_manifest(args.checkpoint,args.manifest,args.out,args.split_name,args.mode,args.tile,args.overlap,
-            args.device,not args.fp32,args.export,args.split))}
+            args.device,not args.fp32,args.export,args.split,compare_full=args.compare_full))}
     if command=='evaluate':
         from .evaluation.report import evaluate_predictions
         cfg=load_config(args.metric_config,'metrics')
         if args.projection: cfg['projection']=True
-        return evaluate_predictions(args.predictions,args.manifest,cfg,args.out)
+        return evaluate_predictions(args.predictions,args.manifest,cfg,args.out,args.lv_annotations,args.lv_extractor,args.lv_device)
     if command=='benchmark':
-        result=benchmark(load_config(args.config),args.stage,args.phase_count,args.steps,args.weights)
+        result=benchmark(load_config(args.config),args.stage,args.phase_count,args.steps,args.weights,args.temporal_topology)
         if args.out: atomic_json(args.out,result)
+        return result
+    if command=='compare-cycn':
+        from .evaluation.cycn_comparison import compare_cycn
+        result=compare_cycn({arm.upper():getattr(args,arm) for arm in ('a','b','c','d')},
+                            args.motion_tolerance_ml,args.motion_tolerance_source,args.seed)
+        atomic_json(args.out,result)
         return result
     raise ValueError('Unhandled command')
 

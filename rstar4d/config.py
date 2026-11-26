@@ -5,6 +5,28 @@ import yaml
 from .utils.io import resolve
 
 
+def cycn_defaults():
+    return {'mode':'off','fusion':'xy_pre_z','boundary':'from_metadata',
+        'train_policy':'joint','backbone_lr_ratio':0.1,'z_chunk':8}
+
+
+def validate_cycn(values):
+    cfg=merge_strict(cycn_defaults(), {} if values is None else values)
+    choices={'mode':('off','five_phase','center_only'), 'fusion':('xy_pre_z','image_residual'),
+        'boundary':('from_metadata',), 'train_policy':('joint','frozen')}
+    for key, allowed in choices.items():
+        if cfg[key] not in allowed:
+            raise ValueError(f'cycn.{key} must be one of {", ".join(allowed)}')
+    if type(cfg['z_chunk']) is not int or cfg['z_chunk'] < 1:
+        raise ValueError('cycn.z_chunk must be a positive integer')
+    ratio=cfg['backbone_lr_ratio']
+    if type(ratio) not in (int,float) or not 0 < ratio <= 1:
+        raise ValueError('cycn.backbone_lr_ratio must be in (0, 1]')
+    if cfg['mode']=='off' and cfg['train_policy']=='frozen':
+        raise ValueError('cycn.train_policy=frozen requires an enabled CycN branch')
+    return cfg
+
+
 def train_defaults():
     return {'seed':2026,'device':'cuda','workers':0,'pin_memory':False,'log_every':10,'threads':4,
         'deterministic':False,'amp':True,'model_profile':'official_v1',
@@ -15,7 +37,7 @@ def train_defaults():
         'stage1_patch':[1,256,256],'stage2_patches':[[16,128,128],[32,96,96],[64,64,64]],
         'steps_per_epoch':{'1':0,'2':0},'validation_samples_per_case':1,
         'small_volume':'error','min_valid_fraction':.5,'max_attempts':32,
-        'accumulation':1,'clip_grad':None,'temporal_roll':False,'init_weights':None}
+        'accumulation':1,'clip_grad':None,'temporal_roll':False,'init_weights':None,'cycn':cycn_defaults()}
 
 
 def simulation_defaults():
@@ -43,6 +65,7 @@ def merge_strict(defaults,values,path=''):
 
 def validate_train(cfg):
     cfg=merge_strict(train_defaults(),cfg)
+    cfg['cycn']=validate_cycn(cfg['cycn'])
     if cfg['model_profile'] not in ('official_v1','pig_ordered_v1'): raise ValueError('Unknown model profile')
     if cfg['loss']['kind'] not in ('public_code','l1','physical_ssim'): raise ValueError('Unknown loss kind')
     if cfg['scheduler'] not in ('multistep','cosine'): raise ValueError('Unknown scheduler')

@@ -43,7 +43,8 @@ def validate_metadata(meta,t):
     if len(spacing)!=3 or any(not np.isfinite(v) or v<=0 for v in spacing): raise ValueError('Invalid output spacing')
     norm=meta['normalization']
     if set(norm)!={'scale','offset'} or norm['scale']<=0 or not np.isfinite(list(norm.values())).all(): raise ValueError('Invalid normalization')
-    if meta['temporal_topology'] not in ('ordered_states','cyclic'): raise ValueError('Unknown temporal topology')
+    if meta['temporal_topology'] not in ('ordered_states','cyclic'):
+        raise ValueError(f'Unknown temporal_topology: {meta["temporal_topology"]!r}')
     if meta['axis_order']!='TZYX': raise ValueError('Expected explicit TZYX storage order')
     if not meta['coordinate_convention'] or not meta['generation_profile'] or not meta['valid_mask_rule']:
         raise ValueError('Coordinate/generation/mask provenance is required')
@@ -163,7 +164,10 @@ def validate_manifest(path,split=None,require_target=True,full=True):
     rows=read_manifest(path)
     for row in rows:
         if not row.get('sha256') or sha256(row['path'])!=row['sha256']: raise ValueError(f'Data hash mismatch: {row["case_id"]}')
-        info=validate_case(row['path'],require_target,full)
+        try:
+            info=validate_case(row['path'],require_target,full)
+        except ValueError as exc:
+            raise ValueError(f'{row["case_id"]}: {exc}') from exc
         row.update(info)
         if row.get('projections') and sha256(row['projections'])!=row.get('projections_sha256'):
             raise ValueError('Projection hash mismatch')

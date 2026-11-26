@@ -1,0 +1,1712 @@
+{
+  "regression": {
+    "passed": 41,
+    "runner": "python -m unittest discover -s tests"
+  },
+  "authors_block_fp32": {
+    "source_sha256": "ec88e7f221d20dc58c0ec385ef51717e0bbfc642607120a18c93276ccfebb6b9",
+    "seed": 2026,
+    "input_shape": [
+      1,
+      1,
+      3,
+      512,
+      512
+    ],
+    "output_shape": [
+      1,
+      4,
+      504,
+      504
+    ],
+    "parameters": 710,
+    "max_abs": 0.0,
+    "rtol": 1e-05,
+    "atol": 1e-06
+  },
+  "cli_acceptance": {
+    "fixture": "synthetic engineering acceptance",
+    "baseline_fp32": {
+      "keys": 232,
+      "rtol": 1e-05,
+      "atol": 1e-06,
+      "max_abs": {
+        "off": 0.0,
+        "zero_projection": 0.0,
+        "z_chunk_1_vs_16_nonzero": 7.748603820800781e-07
+      }
+    },
+    "train_cases": [
+      "train-cyclic",
+      "train-ordered_states"
+    ],
+    "validation_cases": [
+      "val-cyclic",
+      "val-ordered_states"
+    ],
+    "resume": {
+      "parameters_exact": true,
+      "optimizer_exact": true,
+      "effective_steps": 8,
+      "best": 0.12344362013267748,
+      "learning_rates": {
+        "backbone": 7.499999999999999e-06,
+        "cycn": 7.5e-05
+      }
+    },
+    "boundary_paired_animals": 2,
+    "source_public_weights_sha256": "02dd0a7f9e854d36f4d0ae05f53e31dbc017a961a01a4a3554439a0b995ce42d"
+  },
+  "resources": {
+    "training_amp_synthetic": {
+      "backbone-10": {
+        "environment": {
+          "python": "3.9.23",
+          "platform": "Windows-10-10.0.19045-SP0",
+          "versions": {
+            "torch": "2.3.1+cu118",
+            "numpy": "1.26.3",
+            "scipy": "1.13.1",
+            "h5py": "3.14.0",
+            "nibabel": "5.2.1",
+            "tifffile": "2024.8.30",
+            "pytorch-msssim": "1.0.0",
+            "pytigre": "3.0.0"
+          },
+          "cuda": "11.8",
+          "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER"
+        },
+        "stage": 2,
+        "model_profile": "official_v1",
+        "temporal_topology": "ordered_states",
+        "weights_sha256": "02dd0a7f9e854d36f4d0ae05f53e31dbc017a961a01a4a3554439a0b995ce42d",
+        "config": {
+          "seed": 2026,
+          "device": "cuda",
+          "workers": 0,
+          "pin_memory": false,
+          "log_every": 10,
+          "threads": 4,
+          "deterministic": false,
+          "amp": true,
+          "model_profile": "official_v1",
+          "epochs": {
+            "1": 60,
+            "2": 30
+          },
+          "learning_rate": 1.5e-05,
+          "milestones": {
+            "1": [
+              20,
+              30,
+              40
+            ],
+            "2": [
+              10,
+              20,
+              25
+            ]
+          },
+          "gamma": 0.5,
+          "scheduler": "multistep",
+          "min_lr": 1e-05,
+          "betas": [
+            0.9,
+            0.999
+          ],
+          "weight_decay": 0.0,
+          "loss": {
+            "kind": "public_code",
+            "ssim_weight": 0.1,
+            "window": [
+              0.0,
+              0.05
+            ]
+          },
+          "normalization": {
+            "scale": 0.02,
+            "offset": 0.0
+          },
+          "stage1_patch": [
+            1,
+            256,
+            256
+          ],
+          "stage2_patches": [
+            [
+              16,
+              128,
+              128
+            ],
+            [
+              32,
+              96,
+              96
+            ],
+            [
+              64,
+              64,
+              64
+            ]
+          ],
+          "steps_per_epoch": {
+            "1": 0,
+            "2": 0
+          },
+          "validation_samples_per_case": 1,
+          "small_volume": "error",
+          "min_valid_fraction": 0.5,
+          "max_attempts": 32,
+          "accumulation": 1,
+          "clip_grad": null,
+          "temporal_roll": false,
+          "init_weights": null,
+          "cycn": {
+            "mode": "off",
+            "fusion": "xy_pre_z",
+            "boundary": "from_metadata",
+            "train_policy": "joint",
+            "backbone_lr_ratio": 0.1,
+            "z_chunk": 8
+          }
+        },
+        "results": [
+          {
+            "shape": [
+              1,
+              2,
+              10,
+              16,
+              128,
+              128
+            ],
+            "steps": 2,
+            "seconds": 3.4471923,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": true
+            },
+            "learning_rates": {
+              "backbone": 1.5e-05
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.72359615,
+            "loss": 0.3584385812282562,
+            "peak_allocated_gib": 5.475193977355957,
+            "peak_reserved_gib": 5.8515625
+          },
+          {
+            "shape": [
+              1,
+              2,
+              10,
+              32,
+              96,
+              96
+            ],
+            "steps": 2,
+            "seconds": 3.377855199999999,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": true
+            },
+            "learning_rates": {
+              "backbone": 1.5e-05
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.6889275999999995,
+            "loss": 0.3584973216056824,
+            "peak_allocated_gib": 6.032474517822266,
+            "peak_reserved_gib": 6.4921875
+          },
+          {
+            "shape": [
+              1,
+              2,
+              10,
+              64,
+              64,
+              64
+            ],
+            "steps": 2,
+            "seconds": 3.133305400000001,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": true
+            },
+            "learning_rates": {
+              "backbone": 1.5e-05
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.5666527000000006,
+            "loss": 0.3592749834060669,
+            "peak_allocated_gib": 5.294285774230957,
+            "peak_reserved_gib": 5.638671875
+          }
+        ]
+      },
+      "backbone-11": {
+        "environment": {
+          "python": "3.9.23",
+          "platform": "Windows-10-10.0.19045-SP0",
+          "versions": {
+            "torch": "2.3.1+cu118",
+            "numpy": "1.26.3",
+            "scipy": "1.13.1",
+            "h5py": "3.14.0",
+            "nibabel": "5.2.1",
+            "tifffile": "2024.8.30",
+            "pytorch-msssim": "1.0.0",
+            "pytigre": "3.0.0"
+          },
+          "cuda": "11.8",
+          "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER"
+        },
+        "stage": 2,
+        "model_profile": "official_v1",
+        "temporal_topology": "ordered_states",
+        "weights_sha256": "02dd0a7f9e854d36f4d0ae05f53e31dbc017a961a01a4a3554439a0b995ce42d",
+        "config": {
+          "seed": 2026,
+          "device": "cuda",
+          "workers": 0,
+          "pin_memory": false,
+          "log_every": 10,
+          "threads": 4,
+          "deterministic": false,
+          "amp": true,
+          "model_profile": "official_v1",
+          "epochs": {
+            "1": 60,
+            "2": 30
+          },
+          "learning_rate": 1.5e-05,
+          "milestones": {
+            "1": [
+              20,
+              30,
+              40
+            ],
+            "2": [
+              10,
+              20,
+              25
+            ]
+          },
+          "gamma": 0.5,
+          "scheduler": "multistep",
+          "min_lr": 1e-05,
+          "betas": [
+            0.9,
+            0.999
+          ],
+          "weight_decay": 0.0,
+          "loss": {
+            "kind": "public_code",
+            "ssim_weight": 0.1,
+            "window": [
+              0.0,
+              0.05
+            ]
+          },
+          "normalization": {
+            "scale": 0.02,
+            "offset": 0.0
+          },
+          "stage1_patch": [
+            1,
+            256,
+            256
+          ],
+          "stage2_patches": [
+            [
+              16,
+              128,
+              128
+            ],
+            [
+              32,
+              96,
+              96
+            ],
+            [
+              64,
+              64,
+              64
+            ]
+          ],
+          "steps_per_epoch": {
+            "1": 0,
+            "2": 0
+          },
+          "validation_samples_per_case": 1,
+          "small_volume": "error",
+          "min_valid_fraction": 0.5,
+          "max_attempts": 32,
+          "accumulation": 1,
+          "clip_grad": null,
+          "temporal_roll": false,
+          "init_weights": null,
+          "cycn": {
+            "mode": "off",
+            "fusion": "xy_pre_z",
+            "boundary": "from_metadata",
+            "train_policy": "joint",
+            "backbone_lr_ratio": 0.1,
+            "z_chunk": 8
+          }
+        },
+        "results": [
+          {
+            "shape": [
+              1,
+              2,
+              11,
+              16,
+              128,
+              128
+            ],
+            "steps": 2,
+            "seconds": 3.5379714999999994,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": true
+            },
+            "learning_rates": {
+              "backbone": 1.5e-05
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.7689857499999997,
+            "loss": 0.358379065990448,
+            "peak_allocated_gib": 5.9788713455200195,
+            "peak_reserved_gib": 6.44140625
+          },
+          {
+            "shape": [
+              1,
+              2,
+              11,
+              32,
+              96,
+              96
+            ],
+            "steps": 2,
+            "seconds": 3.6956629000000003,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": true
+            },
+            "learning_rates": {
+              "backbone": 1.5e-05
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.8478314500000002,
+            "loss": 0.3586806058883667,
+            "peak_allocated_gib": 6.586966514587402,
+            "peak_reserved_gib": 7.02734375
+          },
+          {
+            "shape": [
+              1,
+              2,
+              11,
+              64,
+              64,
+              64
+            ],
+            "steps": 2,
+            "seconds": 3.2688638,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": true
+            },
+            "learning_rates": {
+              "backbone": 1.5e-05
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.6344319,
+            "loss": 0.3590273857116699,
+            "peak_allocated_gib": 5.7762651443481445,
+            "peak_reserved_gib": 6.1875
+          }
+        ]
+      },
+      "five_phase-10": {
+        "environment": {
+          "python": "3.9.23",
+          "platform": "Windows-10-10.0.19045-SP0",
+          "versions": {
+            "torch": "2.3.1+cu118",
+            "numpy": "1.26.3",
+            "scipy": "1.13.1",
+            "h5py": "3.14.0",
+            "nibabel": "5.2.1",
+            "tifffile": "2024.8.30",
+            "pytorch-msssim": "1.0.0",
+            "pytigre": "3.0.0"
+          },
+          "cuda": "11.8",
+          "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER"
+        },
+        "stage": 2,
+        "model_profile": "official_v1",
+        "temporal_topology": "ordered_states",
+        "weights_sha256": "02dd0a7f9e854d36f4d0ae05f53e31dbc017a961a01a4a3554439a0b995ce42d",
+        "config": {
+          "seed": 2026,
+          "device": "cuda",
+          "workers": 0,
+          "pin_memory": false,
+          "log_every": 10,
+          "threads": 4,
+          "deterministic": false,
+          "amp": true,
+          "model_profile": "official_v1",
+          "epochs": {
+            "1": 60,
+            "2": 30
+          },
+          "learning_rate": 0.00015,
+          "milestones": {
+            "1": [
+              20,
+              30,
+              40
+            ],
+            "2": [
+              10,
+              20,
+              25
+            ]
+          },
+          "gamma": 0.5,
+          "scheduler": "multistep",
+          "min_lr": 1e-05,
+          "betas": [
+            0.9,
+            0.999
+          ],
+          "weight_decay": 0.0,
+          "loss": {
+            "kind": "public_code",
+            "ssim_weight": 0.1,
+            "window": [
+              0.0,
+              0.05
+            ]
+          },
+          "normalization": {
+            "scale": 0.02,
+            "offset": 0.0
+          },
+          "stage1_patch": [
+            1,
+            256,
+            256
+          ],
+          "stage2_patches": [
+            [
+              16,
+              128,
+              128
+            ],
+            [
+              32,
+              96,
+              96
+            ],
+            [
+              64,
+              64,
+              64
+            ]
+          ],
+          "steps_per_epoch": {
+            "1": 0,
+            "2": 0
+          },
+          "validation_samples_per_case": 1,
+          "small_volume": "error",
+          "min_valid_fraction": 0.5,
+          "max_attempts": 32,
+          "accumulation": 1,
+          "clip_grad": null,
+          "temporal_roll": false,
+          "init_weights": null,
+          "cycn": {
+            "mode": "five_phase",
+            "fusion": "xy_pre_z",
+            "boundary": "from_metadata",
+            "train_policy": "joint",
+            "backbone_lr_ratio": 0.1,
+            "z_chunk": 8
+          }
+        },
+        "results": [
+          {
+            "shape": [
+              1,
+              2,
+              10,
+              16,
+              128,
+              128
+            ],
+            "steps": 2,
+            "seconds": 3.9317712000000005,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": true,
+              "cycn": true
+            },
+            "learning_rates": {
+              "backbone": 1.4999999999999999e-05,
+              "cycn": 0.00015
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.9658856000000002,
+            "loss": 0.35843560099601746,
+            "peak_allocated_gib": 5.595777988433838,
+            "peak_reserved_gib": 5.9296875
+          },
+          {
+            "shape": [
+              1,
+              2,
+              10,
+              32,
+              96,
+              96
+            ],
+            "steps": 2,
+            "seconds": 3.696135700000001,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": true,
+              "cycn": true
+            },
+            "learning_rates": {
+              "backbone": 1.4999999999999999e-05,
+              "cycn": 0.00015
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.8480678500000005,
+            "loss": 0.35849255323410034,
+            "peak_allocated_gib": 6.159043788909912,
+            "peak_reserved_gib": 6.712890625
+          },
+          {
+            "shape": [
+              1,
+              2,
+              10,
+              64,
+              64,
+              64
+            ],
+            "steps": 2,
+            "seconds": 3.2050891000000004,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": true,
+              "cycn": true
+            },
+            "learning_rates": {
+              "backbone": 1.4999999999999999e-05,
+              "cycn": 0.00015
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.6025445500000002,
+            "loss": 0.35926562547683716,
+            "peak_allocated_gib": 5.404951572418213,
+            "peak_reserved_gib": 5.865234375
+          }
+        ]
+      },
+      "five_phase-11": {
+        "environment": {
+          "python": "3.9.23",
+          "platform": "Windows-10-10.0.19045-SP0",
+          "versions": {
+            "torch": "2.3.1+cu118",
+            "numpy": "1.26.3",
+            "scipy": "1.13.1",
+            "h5py": "3.14.0",
+            "nibabel": "5.2.1",
+            "tifffile": "2024.8.30",
+            "pytorch-msssim": "1.0.0",
+            "pytigre": "3.0.0"
+          },
+          "cuda": "11.8",
+          "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER"
+        },
+        "stage": 2,
+        "model_profile": "official_v1",
+        "temporal_topology": "ordered_states",
+        "weights_sha256": "02dd0a7f9e854d36f4d0ae05f53e31dbc017a961a01a4a3554439a0b995ce42d",
+        "config": {
+          "seed": 2026,
+          "device": "cuda",
+          "workers": 0,
+          "pin_memory": false,
+          "log_every": 10,
+          "threads": 4,
+          "deterministic": false,
+          "amp": true,
+          "model_profile": "official_v1",
+          "epochs": {
+            "1": 60,
+            "2": 30
+          },
+          "learning_rate": 0.00015,
+          "milestones": {
+            "1": [
+              20,
+              30,
+              40
+            ],
+            "2": [
+              10,
+              20,
+              25
+            ]
+          },
+          "gamma": 0.5,
+          "scheduler": "multistep",
+          "min_lr": 1e-05,
+          "betas": [
+            0.9,
+            0.999
+          ],
+          "weight_decay": 0.0,
+          "loss": {
+            "kind": "public_code",
+            "ssim_weight": 0.1,
+            "window": [
+              0.0,
+              0.05
+            ]
+          },
+          "normalization": {
+            "scale": 0.02,
+            "offset": 0.0
+          },
+          "stage1_patch": [
+            1,
+            256,
+            256
+          ],
+          "stage2_patches": [
+            [
+              16,
+              128,
+              128
+            ],
+            [
+              32,
+              96,
+              96
+            ],
+            [
+              64,
+              64,
+              64
+            ]
+          ],
+          "steps_per_epoch": {
+            "1": 0,
+            "2": 0
+          },
+          "validation_samples_per_case": 1,
+          "small_volume": "error",
+          "min_valid_fraction": 0.5,
+          "max_attempts": 32,
+          "accumulation": 1,
+          "clip_grad": null,
+          "temporal_roll": false,
+          "init_weights": null,
+          "cycn": {
+            "mode": "five_phase",
+            "fusion": "xy_pre_z",
+            "boundary": "from_metadata",
+            "train_policy": "joint",
+            "backbone_lr_ratio": 0.1,
+            "z_chunk": 8
+          }
+        },
+        "results": [
+          {
+            "shape": [
+              1,
+              2,
+              11,
+              16,
+              128,
+              128
+            ],
+            "steps": 2,
+            "seconds": 3.9858347,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": true,
+              "cycn": true
+            },
+            "learning_rates": {
+              "backbone": 1.4999999999999999e-05,
+              "cycn": 0.00015
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.99291735,
+            "loss": 0.3583766222000122,
+            "peak_allocated_gib": 6.1115851402282715,
+            "peak_reserved_gib": 6.572265625
+          },
+          {
+            "shape": [
+              1,
+              2,
+              11,
+              32,
+              96,
+              96
+            ],
+            "steps": 2,
+            "seconds": 3.9238251,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": true,
+              "cycn": true
+            },
+            "learning_rates": {
+              "backbone": 1.4999999999999999e-05,
+              "cycn": 0.00015
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.96191255,
+            "loss": 0.3586748540401459,
+            "peak_allocated_gib": 6.732856273651123,
+            "peak_reserved_gib": 7.19140625
+          },
+          {
+            "shape": [
+              1,
+              2,
+              11,
+              64,
+              64,
+              64
+            ],
+            "steps": 2,
+            "seconds": 3.370522600000001,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": true,
+              "cycn": true
+            },
+            "learning_rates": {
+              "backbone": 1.4999999999999999e-05,
+              "cycn": 0.00015
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.6852613000000005,
+            "loss": 0.35901889204978943,
+            "peak_allocated_gib": 5.897116184234619,
+            "peak_reserved_gib": 6.326171875
+          }
+        ]
+      },
+      "frozen-10": {
+        "environment": {
+          "python": "3.9.23",
+          "platform": "Windows-10-10.0.19045-SP0",
+          "versions": {
+            "torch": "2.3.1+cu118",
+            "numpy": "1.26.3",
+            "scipy": "1.13.1",
+            "h5py": "3.14.0",
+            "nibabel": "5.2.1",
+            "tifffile": "2024.8.30",
+            "pytorch-msssim": "1.0.0",
+            "pytigre": "3.0.0"
+          },
+          "cuda": "11.8",
+          "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER"
+        },
+        "stage": 2,
+        "model_profile": "official_v1",
+        "temporal_topology": "ordered_states",
+        "weights_sha256": "02dd0a7f9e854d36f4d0ae05f53e31dbc017a961a01a4a3554439a0b995ce42d",
+        "config": {
+          "seed": 2026,
+          "device": "cuda",
+          "workers": 0,
+          "pin_memory": false,
+          "log_every": 10,
+          "threads": 4,
+          "deterministic": false,
+          "amp": true,
+          "model_profile": "official_v1",
+          "epochs": {
+            "1": 60,
+            "2": 30
+          },
+          "learning_rate": 0.00015,
+          "milestones": {
+            "1": [
+              20,
+              30,
+              40
+            ],
+            "2": [
+              10,
+              20,
+              25
+            ]
+          },
+          "gamma": 0.5,
+          "scheduler": "multistep",
+          "min_lr": 1e-05,
+          "betas": [
+            0.9,
+            0.999
+          ],
+          "weight_decay": 0.0,
+          "loss": {
+            "kind": "public_code",
+            "ssim_weight": 0.1,
+            "window": [
+              0.0,
+              0.05
+            ]
+          },
+          "normalization": {
+            "scale": 0.02,
+            "offset": 0.0
+          },
+          "stage1_patch": [
+            1,
+            256,
+            256
+          ],
+          "stage2_patches": [
+            [
+              16,
+              128,
+              128
+            ],
+            [
+              32,
+              96,
+              96
+            ],
+            [
+              64,
+              64,
+              64
+            ]
+          ],
+          "steps_per_epoch": {
+            "1": 0,
+            "2": 0
+          },
+          "validation_samples_per_case": 1,
+          "small_volume": "error",
+          "min_valid_fraction": 0.5,
+          "max_attempts": 32,
+          "accumulation": 1,
+          "clip_grad": null,
+          "temporal_roll": false,
+          "init_weights": null,
+          "cycn": {
+            "mode": "five_phase",
+            "fusion": "xy_pre_z",
+            "boundary": "from_metadata",
+            "train_policy": "frozen",
+            "backbone_lr_ratio": 0.1,
+            "z_chunk": 8
+          }
+        },
+        "results": [
+          {
+            "shape": [
+              1,
+              2,
+              10,
+              16,
+              128,
+              128
+            ],
+            "steps": 2,
+            "seconds": 2.8029446,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": false,
+              "cycn": true
+            },
+            "learning_rates": {
+              "cycn": 0.00015
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.4014723,
+            "loss": 0.36186671257019043,
+            "peak_allocated_gib": 5.586740970611572,
+            "peak_reserved_gib": 5.9296875
+          },
+          {
+            "shape": [
+              1,
+              2,
+              10,
+              32,
+              96,
+              96
+            ],
+            "steps": 2,
+            "seconds": 2.5148687,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": false,
+              "cycn": true
+            },
+            "learning_rates": {
+              "cycn": 0.00015
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.25743435,
+            "loss": 0.3618188202381134,
+            "peak_allocated_gib": 6.1553778648376465,
+            "peak_reserved_gib": 6.6328125
+          },
+          {
+            "shape": [
+              1,
+              2,
+              10,
+              64,
+              64,
+              64
+            ],
+            "steps": 2,
+            "seconds": 2.1749836999999994,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": false,
+              "cycn": true
+            },
+            "learning_rates": {
+              "cycn": 0.00015
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.0874918499999997,
+            "loss": 0.36271148920059204,
+            "peak_allocated_gib": 5.3969197273254395,
+            "peak_reserved_gib": 5.759765625
+          }
+        ]
+      },
+      "frozen-11": {
+        "environment": {
+          "python": "3.9.23",
+          "platform": "Windows-10-10.0.19045-SP0",
+          "versions": {
+            "torch": "2.3.1+cu118",
+            "numpy": "1.26.3",
+            "scipy": "1.13.1",
+            "h5py": "3.14.0",
+            "nibabel": "5.2.1",
+            "tifffile": "2024.8.30",
+            "pytorch-msssim": "1.0.0",
+            "pytigre": "3.0.0"
+          },
+          "cuda": "11.8",
+          "gpu": "NVIDIA GeForce RTX 4070 Ti SUPER"
+        },
+        "stage": 2,
+        "model_profile": "official_v1",
+        "temporal_topology": "ordered_states",
+        "weights_sha256": "02dd0a7f9e854d36f4d0ae05f53e31dbc017a961a01a4a3554439a0b995ce42d",
+        "config": {
+          "seed": 2026,
+          "device": "cuda",
+          "workers": 0,
+          "pin_memory": false,
+          "log_every": 10,
+          "threads": 4,
+          "deterministic": false,
+          "amp": true,
+          "model_profile": "official_v1",
+          "epochs": {
+            "1": 60,
+            "2": 30
+          },
+          "learning_rate": 0.00015,
+          "milestones": {
+            "1": [
+              20,
+              30,
+              40
+            ],
+            "2": [
+              10,
+              20,
+              25
+            ]
+          },
+          "gamma": 0.5,
+          "scheduler": "multistep",
+          "min_lr": 1e-05,
+          "betas": [
+            0.9,
+            0.999
+          ],
+          "weight_decay": 0.0,
+          "loss": {
+            "kind": "public_code",
+            "ssim_weight": 0.1,
+            "window": [
+              0.0,
+              0.05
+            ]
+          },
+          "normalization": {
+            "scale": 0.02,
+            "offset": 0.0
+          },
+          "stage1_patch": [
+            1,
+            256,
+            256
+          ],
+          "stage2_patches": [
+            [
+              16,
+              128,
+              128
+            ],
+            [
+              32,
+              96,
+              96
+            ],
+            [
+              64,
+              64,
+              64
+            ]
+          ],
+          "steps_per_epoch": {
+            "1": 0,
+            "2": 0
+          },
+          "validation_samples_per_case": 1,
+          "small_volume": "error",
+          "min_valid_fraction": 0.5,
+          "max_attempts": 32,
+          "accumulation": 1,
+          "clip_grad": null,
+          "temporal_roll": false,
+          "init_weights": null,
+          "cycn": {
+            "mode": "five_phase",
+            "fusion": "xy_pre_z",
+            "boundary": "from_metadata",
+            "train_policy": "frozen",
+            "backbone_lr_ratio": 0.1,
+            "z_chunk": 8
+          }
+        },
+        "results": [
+          {
+            "shape": [
+              1,
+              2,
+              11,
+              16,
+              128,
+              128
+            ],
+            "steps": 2,
+            "seconds": 2.9166528,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": false,
+              "cycn": true
+            },
+            "learning_rates": {
+              "cycn": 0.00015
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.4583264,
+            "loss": 0.3616733253002167,
+            "peak_allocated_gib": 6.102384090423584,
+            "peak_reserved_gib": 6.509765625
+          },
+          {
+            "shape": [
+              1,
+              2,
+              11,
+              32,
+              96,
+              96
+            ],
+            "steps": 2,
+            "seconds": 2.7472672000000005,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": false,
+              "cycn": true
+            },
+            "learning_rates": {
+              "cycn": 0.00015
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.3736336000000002,
+            "loss": 0.3620533049106598,
+            "peak_allocated_gib": 6.720500469207764,
+            "peak_reserved_gib": 7.17578125
+          },
+          {
+            "shape": [
+              1,
+              2,
+              11,
+              64,
+              64,
+              64
+            ],
+            "steps": 2,
+            "seconds": 2.3398736000000007,
+            "parameter_update": true,
+            "groups_updated": {
+              "backbone": false,
+              "cycn": true
+            },
+            "learning_rates": {
+              "cycn": 0.00015
+            },
+            "optimizer_updates": 2,
+            "amp_overflows": 0,
+            "seconds_per_effective_update": 1.1699368000000003,
+            "loss": 0.36237430572509766,
+            "peak_allocated_gib": 5.886776447296143,
+            "peak_reserved_gib": 6.3125
+          }
+        ]
+      }
+    },
+    "inference_amp_synthetic": {
+      "A": {
+        "val-cyclic": {
+          "mode": "tiled",
+          "tile": [
+            6,
+            16,
+            24
+          ],
+          "overlap": [
+            2,
+            8,
+            16
+          ],
+          "stage": 2,
+          "model_profile": "official_v1",
+          "cycn": {
+            "mode": "off",
+            "fusion": "xy_pre_z",
+            "boundary": "from_metadata",
+            "train_policy": "joint",
+            "backbone_lr_ratio": 0.1,
+            "z_chunk": 8
+          },
+          "checkpoint_sha256": "49a6f3ca722761c0e4f260ecbc98180d7ab2d21a37b3ccee05fd434aefbf3af4",
+          "initialization_sha256": null,
+          "source_sha256": "c15bec23825df23b7e76b46fe305895f6b4d7033bb169519383695c1e311d346",
+          "split_name": "val",
+          "split_hash": "96ece27378149217b814cca7588ec2e6138e5a2908fac02a4b801e06828f067d",
+          "device": "cuda",
+          "precision": "amp",
+          "resource": {
+            "seconds": 0.30234859999999975,
+            "peak_allocated_gib": 0.01701498031616211,
+            "peak_reserved_gib": 0.037109375
+          },
+          "full_comparison": {
+            "status": "ok",
+            "resource": {
+              "seconds": 0.08648450000000008,
+              "peak_allocated_gib": 0.029272079467773438,
+              "peak_reserved_gib": 0.0390625
+            },
+            "margin_voxels": 4,
+            "seam": {
+              "voxels": 40450,
+              "mae": 0.001729109379640183,
+              "max_abs": 0.009490089491009712
+            },
+            "interior": {
+              "voxels": 800,
+              "mae": 0.00033140563929919155,
+              "max_abs": 0.0011523435823619366
+            }
+          }
+        },
+        "val-ordered_states": {
+          "mode": "tiled",
+          "tile": [
+            6,
+            16,
+            24
+          ],
+          "overlap": [
+            2,
+            8,
+            16
+          ],
+          "stage": 2,
+          "model_profile": "official_v1",
+          "cycn": {
+            "mode": "off",
+            "fusion": "xy_pre_z",
+            "boundary": "from_metadata",
+            "train_policy": "joint",
+            "backbone_lr_ratio": 0.1,
+            "z_chunk": 8
+          },
+          "checkpoint_sha256": "49a6f3ca722761c0e4f260ecbc98180d7ab2d21a37b3ccee05fd434aefbf3af4",
+          "initialization_sha256": null,
+          "source_sha256": "2e6a107f1e35293d0bf913474ce41b9c752bcb34e512325873756cbffc899340",
+          "split_name": "val",
+          "split_hash": "96ece27378149217b814cca7588ec2e6138e5a2908fac02a4b801e06828f067d",
+          "device": "cuda",
+          "precision": "amp",
+          "resource": {
+            "seconds": 0.16105119999999973,
+            "peak_allocated_gib": 0.017527103424072266,
+            "peak_reserved_gib": 0.0390625
+          },
+          "full_comparison": {
+            "status": "ok",
+            "resource": {
+              "seconds": 0.08471969999999995,
+              "peak_allocated_gib": 0.031009674072265625,
+              "peak_reserved_gib": 0.0390625
+            },
+            "margin_voxels": 4,
+            "seam": {
+              "voxels": 44495,
+              "mae": 0.0016388772445293303,
+              "max_abs": 0.009256059303879738
+            },
+            "interior": {
+              "voxels": 880,
+              "mae": 0.00032716229060580107,
+              "max_abs": 0.001425781287252903
+            }
+          }
+        }
+      },
+      "B": {
+        "val-cyclic": {
+          "mode": "tiled",
+          "tile": [
+            6,
+            16,
+            24
+          ],
+          "overlap": [
+            2,
+            8,
+            16
+          ],
+          "stage": 2,
+          "model_profile": "official_v1",
+          "cycn": {
+            "mode": "off",
+            "fusion": "xy_pre_z",
+            "boundary": "from_metadata",
+            "train_policy": "joint",
+            "backbone_lr_ratio": 0.1,
+            "z_chunk": 2
+          },
+          "checkpoint_sha256": "553ab326c0e46f4777c0fd79ef0a479d0765582b041ac1357348059451111fce",
+          "initialization_sha256": "49a6f3ca722761c0e4f260ecbc98180d7ab2d21a37b3ccee05fd434aefbf3af4",
+          "source_sha256": "c15bec23825df23b7e76b46fe305895f6b4d7033bb169519383695c1e311d346",
+          "split_name": "val",
+          "split_hash": "96ece27378149217b814cca7588ec2e6138e5a2908fac02a4b801e06828f067d",
+          "device": "cuda",
+          "precision": "amp",
+          "resource": {
+            "seconds": 0.3077160000000001,
+            "peak_allocated_gib": 0.01701498031616211,
+            "peak_reserved_gib": 0.037109375
+          },
+          "full_comparison": {
+            "status": "ok",
+            "resource": {
+              "seconds": 0.08362389999999964,
+              "peak_allocated_gib": 0.029272079467773438,
+              "peak_reserved_gib": 0.0390625
+            },
+            "margin_voxels": 4,
+            "seam": {
+              "voxels": 40450,
+              "mae": 0.0015245037817146413,
+              "max_abs": 0.009594005532562733
+            },
+            "interior": {
+              "voxels": 800,
+              "mae": 0.0002179809584049508,
+              "max_abs": 0.0006738281808793545
+            }
+          }
+        },
+        "val-ordered_states": {
+          "mode": "tiled",
+          "tile": [
+            6,
+            16,
+            24
+          ],
+          "overlap": [
+            2,
+            8,
+            16
+          ],
+          "stage": 2,
+          "model_profile": "official_v1",
+          "cycn": {
+            "mode": "off",
+            "fusion": "xy_pre_z",
+            "boundary": "from_metadata",
+            "train_policy": "joint",
+            "backbone_lr_ratio": 0.1,
+            "z_chunk": 2
+          },
+          "checkpoint_sha256": "553ab326c0e46f4777c0fd79ef0a479d0765582b041ac1357348059451111fce",
+          "initialization_sha256": "49a6f3ca722761c0e4f260ecbc98180d7ab2d21a37b3ccee05fd434aefbf3af4",
+          "source_sha256": "2e6a107f1e35293d0bf913474ce41b9c752bcb34e512325873756cbffc899340",
+          "split_name": "val",
+          "split_hash": "96ece27378149217b814cca7588ec2e6138e5a2908fac02a4b801e06828f067d",
+          "device": "cuda",
+          "precision": "amp",
+          "resource": {
+            "seconds": 0.18472640000000018,
+            "peak_allocated_gib": 0.017527103424072266,
+            "peak_reserved_gib": 0.0390625
+          },
+          "full_comparison": {
+            "status": "ok",
+            "resource": {
+              "seconds": 0.09051229999999988,
+              "peak_allocated_gib": 0.031009674072265625,
+              "peak_reserved_gib": 0.0390625
+            },
+            "margin_voxels": 4,
+            "seam": {
+              "voxels": 44495,
+              "mae": 0.0014444374511901053,
+              "max_abs": 0.009088483639061451
+            },
+            "interior": {
+              "voxels": 880,
+              "mae": 0.00019905783013779332,
+              "max_abs": 0.0010009761899709702
+            }
+          }
+        }
+      },
+      "C": {
+        "val-cyclic": {
+          "mode": "tiled",
+          "tile": [
+            6,
+            16,
+            24
+          ],
+          "overlap": [
+            2,
+            8,
+            16
+          ],
+          "stage": 2,
+          "model_profile": "official_v1",
+          "cycn": {
+            "mode": "center_only",
+            "fusion": "xy_pre_z",
+            "boundary": "from_metadata",
+            "train_policy": "joint",
+            "backbone_lr_ratio": 0.1,
+            "z_chunk": 2
+          },
+          "checkpoint_sha256": "9667470c3b6c322f9ef4fdfae7dbd7f69d17e065680225b99eed1e48d32a30b0",
+          "initialization_sha256": "49a6f3ca722761c0e4f260ecbc98180d7ab2d21a37b3ccee05fd434aefbf3af4",
+          "source_sha256": "c15bec23825df23b7e76b46fe305895f6b4d7033bb169519383695c1e311d346",
+          "split_name": "val",
+          "split_hash": "96ece27378149217b814cca7588ec2e6138e5a2908fac02a4b801e06828f067d",
+          "device": "cuda",
+          "precision": "amp",
+          "resource": {
+            "seconds": 0.36135830000000024,
+            "peak_allocated_gib": 0.13372325897216797,
+            "peak_reserved_gib": 0.142578125
+          },
+          "full_comparison": {
+            "status": "ok",
+            "resource": {
+              "seconds": 0.0971438,
+              "peak_allocated_gib": 0.13585424423217773,
+              "peak_reserved_gib": 0.14453125
+            },
+            "margin_voxels": 4,
+            "seam": {
+              "voxels": 40450,
+              "mae": 0.0015274379451210036,
+              "max_abs": 0.009620646946132183
+            },
+            "interior": {
+              "voxels": 800,
+              "mae": 0.00022186275804415346,
+              "max_abs": 0.000693359412252903
+            }
+          }
+        },
+        "val-ordered_states": {
+          "mode": "tiled",
+          "tile": [
+            6,
+            16,
+            24
+          ],
+          "overlap": [
+            2,
+            8,
+            16
+          ],
+          "stage": 2,
+          "model_profile": "official_v1",
+          "cycn": {
+            "mode": "center_only",
+            "fusion": "xy_pre_z",
+            "boundary": "from_metadata",
+            "train_policy": "joint",
+            "backbone_lr_ratio": 0.1,
+            "z_chunk": 2
+          },
+          "checkpoint_sha256": "9667470c3b6c322f9ef4fdfae7dbd7f69d17e065680225b99eed1e48d32a30b0",
+          "initialization_sha256": "49a6f3ca722761c0e4f260ecbc98180d7ab2d21a37b3ccee05fd434aefbf3af4",
+          "source_sha256": "2e6a107f1e35293d0bf913474ce41b9c752bcb34e512325873756cbffc899340",
+          "split_name": "val",
+          "split_hash": "96ece27378149217b814cca7588ec2e6138e5a2908fac02a4b801e06828f067d",
+          "device": "cuda",
+          "precision": "amp",
+          "resource": {
+            "seconds": 0.19050209999999979,
+            "peak_allocated_gib": 0.13380146026611328,
+            "peak_reserved_gib": 0.14453125
+          },
+          "full_comparison": {
+            "status": "ok",
+            "resource": {
+              "seconds": 0.09143029999999985,
+              "peak_allocated_gib": 0.13614559173583984,
+              "peak_reserved_gib": 0.14453125
+            },
+            "margin_voxels": 4,
+            "seam": {
+              "voxels": 44495,
+              "mae": 0.0014455921727762502,
+              "max_abs": 0.009049203246831894
+            },
+            "interior": {
+              "voxels": 880,
+              "mae": 0.00020216507466763934,
+              "max_abs": 0.0009960941970348358
+            }
+          }
+        }
+      },
+      "D": {
+        "val-cyclic": {
+          "mode": "tiled",
+          "tile": [
+            6,
+            16,
+            24
+          ],
+          "overlap": [
+            2,
+            8,
+            16
+          ],
+          "stage": 2,
+          "model_profile": "official_v1",
+          "cycn": {
+            "mode": "five_phase",
+            "fusion": "xy_pre_z",
+            "boundary": "from_metadata",
+            "train_policy": "joint",
+            "backbone_lr_ratio": 0.1,
+            "z_chunk": 2
+          },
+          "checkpoint_sha256": "1352027a3bfe51988c03bd9b519d498950b6d69417f0b1fad0fd5487d5651f8f",
+          "initialization_sha256": "49a6f3ca722761c0e4f260ecbc98180d7ab2d21a37b3ccee05fd434aefbf3af4",
+          "source_sha256": "c15bec23825df23b7e76b46fe305895f6b4d7033bb169519383695c1e311d346",
+          "split_name": "val",
+          "split_hash": "96ece27378149217b814cca7588ec2e6138e5a2908fac02a4b801e06828f067d",
+          "device": "cuda",
+          "precision": "amp",
+          "resource": {
+            "seconds": 0.40150549999999985,
+            "peak_allocated_gib": 0.13380956649780273,
+            "peak_reserved_gib": 0.142578125
+          },
+          "full_comparison": {
+            "status": "ok",
+            "resource": {
+              "seconds": 0.10450790000000021,
+              "peak_allocated_gib": 0.13603925704956055,
+              "peak_reserved_gib": 0.14453125
+            },
+            "margin_voxels": 4,
+            "seam": {
+              "voxels": 40450,
+              "mae": 0.0015274882195943367,
+              "max_abs": 0.009623040445148945
+            },
+            "interior": {
+              "voxels": 800,
+              "mae": 0.00022188718954566867,
+              "max_abs": 0.0006787106394767761
+            }
+          }
+        },
+        "val-ordered_states": {
+          "mode": "tiled",
+          "tile": [
+            6,
+            16,
+            24
+          ],
+          "overlap": [
+            2,
+            8,
+            16
+          ],
+          "stage": 2,
+          "model_profile": "official_v1",
+          "cycn": {
+            "mode": "five_phase",
+            "fusion": "xy_pre_z",
+            "boundary": "from_metadata",
+            "train_policy": "joint",
+            "backbone_lr_ratio": 0.1,
+            "z_chunk": 2
+          },
+          "checkpoint_sha256": "1352027a3bfe51988c03bd9b519d498950b6d69417f0b1fad0fd5487d5651f8f",
+          "initialization_sha256": "49a6f3ca722761c0e4f260ecbc98180d7ab2d21a37b3ccee05fd434aefbf3af4",
+          "source_sha256": "2e6a107f1e35293d0bf913474ce41b9c752bcb34e512325873756cbffc899340",
+          "split_name": "val",
+          "split_hash": "96ece27378149217b814cca7588ec2e6138e5a2908fac02a4b801e06828f067d",
+          "device": "cuda",
+          "precision": "amp",
+          "resource": {
+            "seconds": 0.1820132000000001,
+            "peak_allocated_gib": 0.1338963508605957,
+            "peak_reserved_gib": 0.14453125
+          },
+          "full_comparison": {
+            "status": "ok",
+            "resource": {
+              "seconds": 0.08489369999999985,
+              "peak_allocated_gib": 0.13634920120239258,
+              "peak_reserved_gib": 0.14453125
+            },
+            "margin_voxels": 4,
+            "seam": {
+              "voxels": 44495,
+              "mae": 0.0014457798115440246,
+              "max_abs": 0.009040702134370804
+            },
+            "interior": {
+              "voxels": 880,
+              "mae": 0.00020294744648378005,
+              "max_abs": 0.0010156258940696716
+            }
+          }
+        }
+      }
+    },
+    "pig_crop_public_weights_engineering": {
+      "mode": "tiled",
+      "tile": [
+        16,
+        96,
+        96
+      ],
+      "overlap": [
+        8,
+        48,
+        48
+      ],
+      "stage": 2,
+      "model_profile": "official_v1",
+      "cycn": {
+        "mode": "off",
+        "fusion": "xy_pre_z",
+        "boundary": "from_metadata",
+        "train_policy": "joint",
+        "backbone_lr_ratio": 0.1,
+        "z_chunk": 8
+      },
+      "checkpoint_sha256": "97f1f6c26710be01e07ca7d78bbabb0be4a677a147db5619f5f2e154b43fd1dd",
+      "initialization_sha256": null,
+      "source_sha256": "981cef45b07050255e1350e44c03ba6372691f3156242a34e0122fe0331f5546",
+      "split_name": "all",
+      "split_hash": null,
+      "device": "cuda",
+      "precision": "amp",
+      "resource": {
+        "seconds": 1.0884775000000002,
+        "peak_allocated_gib": 0.33263349533081055,
+        "peak_reserved_gib": 0.478515625
+      },
+      "full_comparison": {
+        "status": "ok",
+        "resource": {
+          "seconds": 0.23943629999999994,
+          "peak_allocated_gib": 0.7524614334106445,
+          "peak_reserved_gib": 1.078125
+        },
+        "margin_voxels": 4,
+        "seam": {
+          "voxels": 2269113,
+          "mae": 0.0002078351651459352,
+          "max_abs": 0.003904314711689949
+        },
+        "interior": {
+          "voxels": 842754,
+          "mae": 0.00020682171084987516,
+          "max_abs": 0.003161715343594551
+        }
+      }
+    }
+  }
+}

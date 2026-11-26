@@ -1,4 +1,4 @@
-"""Verbatim model classes from official Training_Tetris1.ipynb (cells 8-11).
+"""Official Training_Tetris1.ipynb (cells 8-11) with an optional CycN input hook.
 Authors: Ziheng Deng and Jun Zhao. See provenance.json for source SHA256.
 """
 import torch
@@ -114,8 +114,9 @@ class myUNet(nn.Module):
         #self.conv8=convwithactivation4DRSTAR(1*cnum,1,kernel_size=[5,3,3,3],padding=[2,1,1,1],stride=[1,1,1,1],ifrelu=0)
         
 
-    def forward(self,x):
-        x=self.conv1(x)
+    def forward(self,x,*,temporal_topology=None,case_ids=None,cycn_xy_shape=None):
+        cycn=getattr(self,'cycn_branch',None)
+        x=self.conv1(x) if cycn is None else cycn.stem(self.conv1,x,temporal_topology,case_ids,cycn_xy_shape)
         x=self.conv1_3(self.conv1_2(x))+x
         x1=self.conv2(x)
         x1=self.conv2_3(self.conv2_2(x1))+x1

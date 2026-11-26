@@ -58,6 +58,7 @@ class PatchDataset(Dataset):
             x=np.stack([(cbct+offset)/scale,np.broadcast_to((prior+offset)/scale,cbct.shape)])
             return {'input':torch.from_numpy(x.copy()),'target':torch.from_numpy(((target+offset)/scale)[None].copy()),
                     'valid':torch.from_numpy(mask[None].copy()),'case_id':r['case_id'],'animal_id':str(r['animal_id']),
+                    'temporal_topology':self.meta[i]['temporal_topology'],
                     'origin':torch.tensor(origin),'patch_shape':torch.tensor(shape)}
         raise ValueError(f'{r["case_id"]}: no patch {list(shape)} with valid fraction >= {self.config["min_valid_fraction"]} after {self.config["max_attempts"]} attempts (draw {index}); animal/case/shape were not resampled')
 
