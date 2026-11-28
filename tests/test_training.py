@@ -84,6 +84,40 @@ class TTLTrainingTests(unittest.TestCase):
             self.assertEqual(torch.count_nonzero(model.ttl.temporal.weight).item(), 0)
             self.assertEqual(read_jsonl(root/'run/train.jsonl')[0]['event'], 'initial_validation')
 
+    def test_ttl_resume_repairs_interrupted_best_write(self):
+        from unittest.mock import patch
+        from rstar4d.training.checkpoint import atomic_save
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cfg, manifest, split, init = ttl_inputs(root)
+            run = root/'run'
+            best = run/'checkpoints/best.pt'
+            last = run/'checkpoints/last.pt'
+
+            def interrupted_save(path, payload):
+                if path == best and payload['completed_epoch'] == 1:
+                    raise OSError('simulated interruption before best rename')
+                atomic_save(path, payload)
+
+            def score(value):
+                return dict(l1=value, animal_l1=value, cases={'b': value})
+
+            with patch('rstar4d.training.trainer.atomic_save', side_effect=interrupted_save), \
+                 patch('rstar4d.training.trainer.validate_model', side_effect=[score(.5), score(.25)]):
+                with self.assertRaisesRegex(OSError, 'simulated interruption'):
+                    train(cfg, manifest, split, run, 2, init=init)
+            self.assertEqual(load_checkpoint(best)['completed_epoch'], 0)
+            winner = load_checkpoint(last)
+            self.assertEqual((winner['completed_epoch'], winner['step']), (1, 2))
+            with patch('rstar4d.training.trainer.validate_model', return_value=score(.5)):
+                train(cfg, manifest, split, run, 2, resume=last)
+            repaired = load_checkpoint(best)
+            self.assertEqual((repaired['completed_epoch'], repaired['best']), (1, .25))
+            self.assertEqual(load_checkpoint(last)['step'], 4)
+            for name, tensor in winner['state_dict'].items():
+                self.assertTrue(torch.equal(tensor, repaired['state_dict'][name]), name)
+
     def test_ttl_resume_matches_continuous(self):
         import subprocess
         import sys

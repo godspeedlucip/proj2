@@ -195,8 +195,16 @@ def _historical_best(path, saved):
     if not path.is_file():
         raise ValueError('Training checkpoint requires its historical best.pt')
     best = load_checkpoint(path)
+    matches = best['best'] == saved['best']
+    pending_ttl_best = False
+    if saved.get('ttl') is not None:
+        matches = matches and best['completed_epoch'] == saved.get('best_epoch')
+        # An improving TTL epoch publishes last first, including the winning weights.
+        pending_ttl_best = (saved.get('best_epoch') == saved['completed_epoch']
+                            and best['completed_epoch'] < saved['completed_epoch']
+                            and saved['best'] < best['best'])
     if (best.get('run_id') != saved.get('run_id') or best['signature'] != saved['signature']
-            or best['best'] != saved['best'] or best['completed_epoch'] > saved['completed_epoch']):
+            or best['completed_epoch'] > saved['completed_epoch'] or not (matches or pending_ttl_best)):
         raise ValueError('best/last checkpoint lineage mismatch')
     return best
 
@@ -223,6 +231,7 @@ def _validate_ttl_resume(saved, best, config, data, sig):
             raise ValueError('TTL checkpoint requires one TTL optimizer group')
     if (saved['next_epoch'] != saved['completed_epoch'] + 1 or not 0 <= best['step'] <= saved['step']
             or not 0 <= best['completed_epoch'] <= saved['completed_epoch']
+            or best.get('best_epoch') != best['completed_epoch']
             or (best['completed_epoch'] == 0 and best['step'] != 0)):
         raise ValueError('TTL best/last checkpoint progress mismatch')
 
@@ -376,6 +385,7 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
     scaler=torch.cuda.amp.GradScaler(enabled=device.type=='cuda' and config['amp'])
     start_epoch=config['stage2_start_epoch'] if stage == 2 else 1
     step=0; best=math.inf
+    best_epoch = None
     if saved:
         optimizer.load_state_dict(saved['optimizer'])
         if ttl_enabled:
@@ -384,6 +394,7 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
         if config['scheduler']=='multistep': scheduler_state['milestones']=Counter(scheduler_state['milestones'])
         scheduler.load_state_dict(scheduler_state); scaler.load_state_dict(saved['scaler'])
         start_epoch=saved['next_epoch']; step=saved['step']; best=saved['best']; restore_rng(saved['rng'])
+        best_epoch = saved.get('best_epoch')
     elif start_epoch > 1:
         # Position a fresh optimizer at the matching absolute epoch without fictitious updates.
         scheduler.last_epoch = start_epoch - 1
@@ -404,6 +415,12 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
                            manifest=str(Path(manifest).resolve()), parent_checkpoint_sha256=parent_hash,
                            stam=dict(payload['stam'], train_policy=policy, warmup_epochs=warmup))
             atomic_save(ckdir/name, updated)
+    if resume and ttl_enabled and historical_best['best'] != saved['best']:
+        atomic_save(ckdir/'best.pt', saved)
+        append_jsonl(run_dir/'train.jsonl', {'event': 'recovered_best', 'epoch': best_epoch,
+                                            'step': step, 'validation_l1': best})
+        if start_epoch > total_epochs:
+            atomic_json(run_dir/'status.json', {'stage': stage, 'completed_epoch': total_epochs, 'complete': True})
     if start_epoch>total_epochs:
         return {'stage':stage,'complete':True,'checkpoint':str(ckdir/'best.pt'),'last':str(ckdir/'last.pt'),'epochs':total_epochs}
     length=config['steps_per_epoch'][str(stage)] or (sum(r['shape'][1] for r in training) if stage==1 else 15*len(training))
@@ -435,12 +452,14 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
         if ttl_enabled:
             payload['ttl'] = {'architecture': ttl_architecture(ttl_config['mode']),
                               'freeze_policy': 'ttl_only', 'param_groups': _group_names(optimizer)}
+            payload['best_epoch'] = best_epoch
         return payload
 
     try:
         if not saved and stage == 2 and config['stage2_include_initial']:
             best = validate_model(model,validation,config,stage,samples,device)['l1']
-            atomic_save(ckdir/'best.pt', checkpoint_payload(start_epoch - 1))
+            best_epoch = start_epoch - 1
+            atomic_save(ckdir/'best.pt', checkpoint_payload(best_epoch))
             append_jsonl(run_dir/'train.jsonl', {'event': 'initial_validation', 'epoch': start_epoch - 1, 'validation_l1': best})
             if ttl_enabled:
                 configure_ttl_training(model)
@@ -498,7 +517,9 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
             if ttl_enabled:
                 configure_ttl_training(model)
             improved=evaluation['l1']<best
-            if improved: best=evaluation['l1']
+            if improved:
+                best = evaluation['l1']
+                best_epoch = epoch
             lr_used=optimizer.param_groups[0]['lr']; scheduler.step()
             entry={'event':'epoch','epoch':epoch,'stage':stage,'steps':step,'train_l1':total_l1/length,
                 'train_total':total_loss/length,'validation_l1':evaluation['l1'],'validation_animal_l1':evaluation['animal_l1'],
@@ -511,8 +532,11 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
                 entry.update(group_lrs=rates_used, next_group_lrs={group['name']: group['lr'] for group in optimizer.param_groups},
                              backbone_frozen=backbone_frozen)
             payload = checkpoint_payload(epoch)
-            if improved: atomic_save(ckdir/'best.pt',payload)
-            atomic_save(ckdir/'last.pt',payload)
+            if improved and not ttl_enabled:
+                atomic_save(ckdir/'best.pt', payload)
+            atomic_save(ckdir/'last.pt', payload)
+            if improved and ttl_enabled:
+                atomic_save(ckdir/'best.pt', payload)
             if enabled and not ttl_enabled and backbone_frozen and epoch == prefix_epoch:
                 warmup_dir = ckdir/'warmup'
                 atomic_save(warmup_dir/'best.pt', _historical_best(ckdir/'best.pt', payload))
