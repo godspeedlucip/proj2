@@ -39,8 +39,8 @@ def attach_stam(model, config, load_sam=False):
 def attach_ttl(model, config):
     if not config or config['mode'] == 'off':
         return None
-    if model.stage != 2 or getattr(model, 'stam', None) is None:
-        raise ValueError('TTL requires a Stage II model with STAM')
+    if model.stage != 2:
+        raise ValueError('TTL is supported only in Stage II')
     if model.ttl is not None:
         raise ValueError('This model already has TTL')
     from .ttl import TemporalTransformerSkip

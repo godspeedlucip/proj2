@@ -146,22 +146,28 @@ def _group_names(optimizer):
 
 
 def _stam_mode(value, requested):
-    mode = (value.get('stam') or {}).get('architecture', {}).get('mode')
-    if mode not in ('joint', 'temporal_only'):
-        raise ValueError('Expected an existing Stage II STAM checkpoint with architecture metadata')
+    metadata = value.get('stam')
+    if metadata is None:
+        mode = 'off'
+        if requested == 'from_parent':
+            raise ValueError('Expected an existing Stage II STAM checkpoint with architecture metadata')
+    else:
+        mode = metadata.get('architecture', {}).get('mode')
+        if mode not in ('joint', 'temporal_only'):
+            raise ValueError('Unsupported STAM architecture in checkpoint')
     if requested not in ('from_parent', mode):
         raise ValueError(f'Configured STAM mode {requested!r} differs from checkpoint mode {mode!r}')
     return mode
 
 
-def load_stam_parent(path, config):
+def load_ttl_parent(path, config):
     value = load_checkpoint(path, require_training=False)
     if value.get('ttl') is not None:
-        raise ValueError('TTL initialization requires a STAM parent without TTL')
+        raise ValueError('TTL initialization requires a Stage II parent without TTL')
     if value.get('stage') != 2:
-        raise ValueError('TTL initialization requires a Stage II STAM checkpoint')
+        raise ValueError('TTL initialization requires a Stage II checkpoint')
     if value.get('model_profile') != config['model_profile']:
-        raise ValueError('STAM parent model_profile differs from the configuration')
+        raise ValueError('Stage II parent model_profile differs from the configuration')
     _stam_mode(value, config['stam']['mode'])
     return model_from_checkpoint(value), value, sha256(path)
 
@@ -217,14 +223,18 @@ def _validate_ttl_resume(saved, best, config, data, sig):
     digest = saved.get('parent_checkpoint_sha256')
     expected = {'architecture': architecture(config['ttl']['mode']),
                 'freeze_policy': 'ttl_only', 'param_groups': ['ttl']}
+    stam_mode = config['stam']['mode']
+    parent_kind = 'stage2_parent' if stam_mode == 'off' else 'stam_parent'
     for value in (saved, best):
+        _stam_mode(value, stam_mode)
         if value.get('ttl') != expected:
             raise ValueError('TTL checkpoint architecture, freeze policy or parameter groups differ')
         source = value.get('initialization', {})
         if (not isinstance(digest, str) or len(digest) != 64
                 or any(char not in '0123456789abcdef' for char in digest)
                 or value.get('parent_checkpoint_sha256') != digest
-                or source.get('sha256') != digest or source.get('kind') != 'stam_parent'):
+                or source.get('sha256') != digest or source.get('kind') != parent_kind
+                or source.get('source_stage') != 2):
             raise ValueError('TTL best/last checkpoint parent lineage mismatch')
         groups = value['optimizer']['param_groups']
         if len(groups) != 1 or groups[0].get('name') != 'ttl':
@@ -274,26 +284,30 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
     stam_config = config['stam']
     ttl_config = config['ttl']
     ttl_enabled = ttl_config['mode'] != 'off'
-    parent_init = init is not None and init.get('kind') == 'stam_parent'
+    stam_parent_init = init is not None and init.get('kind') == 'stam_parent'
     saved = load_checkpoint(resume or fork_from) if resume or fork_from else None
     if saved and saved['stage']!=stage: raise ValueError('Checkpoint stage mismatch')
     if fork_from and (ttl_enabled or saved.get('ttl') is not None):
         raise ValueError('TTL training supports resume, not --fork-from')
-    if parent_init and (not ttl_enabled or stage != 2 or init.get('source_stage') != 2):
+    if stam_parent_init and (not ttl_enabled or stage != 2 or init.get('source_stage') != 2):
         raise ValueError('--init-from-stam requires Stage II and ttl.mode=full or local3')
     if ttl_enabled:
         if saved:
-            if saved.get('ttl', {}).get('architecture', {}).get('mode') != ttl_config['mode']:
+            if (saved.get('ttl') or {}).get('architecture', {}).get('mode') != ttl_config['mode']:
                 raise ValueError('Training checkpoint TTL architecture mismatch')
             stam_config['mode'] = _stam_mode(saved, stam_config['mode'])
-            for key in ('z_chunk_size', 'activation_checkpointing'):
-                stam_config[key] = saved['config']['stam'][key]
-        elif not parent_init:
-            raise ValueError('TTL training requires --init-from-stam or --resume')
+            if stam_config['mode'] != 'off':
+                for key in ('z_chunk_size', 'activation_checkpointing'):
+                    stam_config[key] = saved['config']['stam'][key]
         else:
-            parent_model, parent, parent_digest = load_stam_parent(init['path'], config)
-            stam_config.update(mode=parent_model.stam.mode, z_chunk_size=parent_model.stam.z_chunk_size,
-                               activation_checkpointing=parent_model.stam.activation_checkpointing)
+            wants_stam = stam_config['mode'] != 'off'
+            if not init or init.get('source_stage') != 2 or stam_parent_init != wants_stam:
+                flag = '--init-from-stam' if wants_stam else '--init-from-stage2'
+                raise ValueError(f"TTL training with stam.mode={stam_config['mode']} requires {flag} or --resume")
+            parent_model, parent, parent_digest = load_ttl_parent(init['path'], config)
+            if parent_model.stam is not None:
+                stam_config.update(mode=parent_model.stam.mode, z_chunk_size=parent_model.stam.z_chunk_size,
+                                   activation_checkpointing=parent_model.stam.activation_checkpointing)
     elif saved and saved.get('ttl') is not None:
         raise ValueError('Training checkpoint TTL architecture mismatch')
     enabled = stam_config['mode'] != 'off'
@@ -321,8 +335,9 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
     parent_hash = saved.get('parent_checkpoint_sha256') if saved else None
     if fork_from:
         parent_best, parent_hash = _fork_prefix(fork_from, saved, config, data, stage)
-    if enabled and rows[0]['metadata']['normalization'] != config['normalization']:
-        raise ValueError('STAM training config and data normalization differ')
+    if (enabled or ttl_enabled) and rows[0]['metadata']['normalization'] != config['normalization']:
+        feature = 'TTL' if ttl_enabled else 'STAM'
+        raise ValueError(f'{feature} training config and data normalization differ')
     device=select_device(config['device']); seed_all(config['seed'],config['deterministic'],config['threads'])
     initialization={'kind':'random','source_stage':None,'sha256':None}
     sam_source = None
@@ -335,12 +350,13 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
         model = model_from_checkpoint(saved)
         initialization=saved['initialization']
     elif ttl_enabled:
-        _validate_stage2_source(parent, config, rows, data, stam_parent=True)
+        _validate_stage2_source(parent, config, rows, data, stam_parent=stam_parent_init)
         model = parent_model
         attach_ttl(model, ttl_config)
-        sam_source = parent['stam'].get('sam_source')
+        sam_source = (parent.get('stam') or {}).get('sam_source')
         parent_hash = parent_digest
-        initialization = {'kind': 'stam_parent', 'source_stage': 2, 'sha256': parent_hash,
+        parent_kind = 'stam_parent' if stam_parent_init else 'stage2_parent'
+        initialization = {'kind': parent_kind, 'source_stage': 2, 'sha256': parent_hash,
                           'path': str(Path(init['path']).resolve())}
         del parent
     else:
@@ -368,8 +384,8 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
     policy = stam_config['train_policy']
     warmup = stam_config['warmup_epochs']
     prefix_epoch = warmup if policy == 'joint_after_warmup' else 10
-    backbone_frozen = enabled and (policy == 'frozen' or (
-        policy == 'joint_after_warmup' and (not saved or saved['completed_epoch'] <= warmup)))
+    backbone_frozen = ttl_enabled or (enabled and (policy == 'frozen' or (
+        policy == 'joint_after_warmup' and (not saved or saved['completed_epoch'] <= warmup))))
     optimizer = make_optimizer(model, config, backbone_frozen)
     if ttl_enabled:
         _check_ttl_optimizer(model, optimizer)
@@ -454,6 +470,7 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
             payload['stam'] = {'architecture': architecture(stam_config['mode']), 'train_policy': policy,
                                'warmup_epochs': warmup, 'backbone_frozen': backbone_frozen, 'sam_frozen': True,
                                'param_groups': _group_names(optimizer), 'sam_source': sam_source}
+        if enabled or ttl_enabled:
             payload['parent_checkpoint_sha256'] = parent_hash
         if ttl_enabled:
             payload['ttl'] = {'architecture': ttl_architecture(ttl_config['mode']),
@@ -479,7 +496,7 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
             if enabled and not ttl_enabled and backbone_frozen and policy == 'joint_after_warmup' and epoch == warmup + 1:
                 _unfreeze_backbone(model, optimizer, scheduler, config)
                 backbone_frozen = False
-            rates_used = {group['name']: group['lr'] for group in optimizer.param_groups} if enabled else None
+            rates_used = {group['name']: group['lr'] for group in optimizer.param_groups} if enabled or ttl_enabled else None
             if device.type=='cuda': torch.cuda.reset_peak_memory_stats(device)
             dataset=PatchDataset(training,config,stage,epoch,length)
             loader=_loader(dataset,config,epoch,stage)
@@ -534,7 +551,7 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
                 'skipped_ssim':skipped,'amp_overflows':amp_overflows,'optimizer_updates':epoch_updates,
                 'sample_count':length,'shape_counts_tzyx':dict(shape_counts),'animal_draw_counts':dict(animal_counts),
                 'valid_fraction':sum(valid_ratios)/len(valid_ratios),'validation_cases':evaluation['cases']}
-            if enabled:
+            if enabled or ttl_enabled:
                 entry.update(group_lrs=rates_used, next_group_lrs={group['name']: group['lr'] for group in optimizer.param_groups},
                              backbone_frozen=backbone_frozen)
             payload = checkpoint_payload(epoch)

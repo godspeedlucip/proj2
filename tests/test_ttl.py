@@ -86,8 +86,21 @@ class TTLStage2Tests(unittest.TestCase):
         self.assertEqual(validate_train({'ttl': {'mode': 'full'}}, 2)['stam']['mode'], 'from_parent')
         with self.assertRaisesRegex(ValueError, 'Stage II'):
             validate_train({'ttl': {'mode': 'full'}}, 1)
-        with self.assertRaisesRegex(ValueError, 'STAM'):
-            create_model(2, ttl={'mode': 'full'})
+        with self.assertRaisesRegex(ValueError, 'Stage II'):
+            create_model(1, ttl={'mode': 'full'})
+
+    def test_original_rstar_ttl_starts_at_parent_prediction(self):
+        from rstar4d.models import attach_ttl, create_model, forward_volume
+
+        parent = create_model(2).eval()
+        child = create_model(2)
+        child.load_state_dict(parent.state_dict(), strict=True)
+        attach_ttl(child, {'mode': 'full'})
+        child.eval()
+        self.assertIsNone(child.stam)
+        with torch.no_grad():
+            x = torch.randn(1, 2, 10, 3, 17, 19)
+            self.assertTrue(torch.equal(forward_volume(parent, x), forward_volume(child, x)))
 
 
 class TTLTests(unittest.TestCase):

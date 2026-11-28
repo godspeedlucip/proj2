@@ -23,7 +23,7 @@ def inputs(root, topologies=('ordered_states',) * 3):
     return cfg,root/'manifest.jsonl',root/'split.json'
 
 
-def ttl_inputs(root, topologies=('ordered_states',) * 3):
+def ttl_inputs(root, topologies=('ordered_states',) * 3, stam_mode='joint'):
     from rstar4d.data.contracts import snapshot, validate_manifest
     from rstar4d.models import create_model
     from rstar4d.models.stam import architecture
@@ -32,19 +32,25 @@ def ttl_inputs(root, topologies=('ordered_states',) * 3):
 
     cfg, manifest, split = inputs(root, topologies)
     torch.manual_seed(11)
-    mode = 'joint'
-    parent = create_model(2, stam={'mode': mode})
-    torch.nn.init.normal_(parent.stam.output_projection.weight, std=0.005)
-    torch.nn.init.normal_(parent.stam.temporal_adapter.up.weight, std=0.01)
+    parent = create_model(2, stam={'mode': stam_mode})
     path = root/'parent.pt'
     groups = read_json(split)
-    atomic_save(path, dict(schema_version=1, checkpoint_kind='weights', stage=2,
-        model_profile=cfg['model_profile'], state_dict=parent.state_dict(),
-        normalization=cfg['normalization'], intensity_domain='mu', calibration_application='none',
-        config=cfg, split=groups, data_snapshot=snapshot(validate_manifest(manifest), groups),
-        temporal_topologies=sorted(set(topologies)), stam={'architecture': architecture(mode)}))
-    cfg.update(ttl={'mode': 'full'}, stam={'mode': 'from_parent'})
-    return cfg, manifest, split, {'kind': 'stam_parent', 'source_stage': 2, 'path': path}
+    payload = dict(schema_version=1, checkpoint_kind='weights', stage=2,
+                   model_profile=cfg['model_profile'], state_dict=parent.state_dict(),
+                   normalization=cfg['normalization'], intensity_domain='mu', calibration_application='none',
+                   split=groups, temporal_topologies=sorted(set(topologies)))
+    init = {'source_stage': 2, 'path': path}
+    stam_config = {'mode': 'off'}
+    if stam_mode != 'off':
+        torch.nn.init.normal_(parent.stam.output_projection.weight, std=0.005)
+        torch.nn.init.normal_(parent.stam.temporal_adapter.up.weight, std=0.01)
+        payload.update(config=cfg, data_snapshot=snapshot(validate_manifest(manifest), groups),
+                       stam={'architecture': architecture(stam_mode)})
+        stam_config['mode'] = 'from_parent'
+        init['kind'] = 'stam_parent'
+    atomic_save(path, payload)
+    cfg.update(ttl={'mode': 'full'}, stam=stam_config)
+    return cfg, manifest, split, init
 
 
 class TTLTrainingTests(unittest.TestCase):

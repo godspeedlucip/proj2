@@ -60,8 +60,6 @@ def validate_train(cfg, stage=None):
             raise ValueError('TTL is supported only in Stage II')
         if 'mode' not in explicit_stam:
             cfg['stam']['mode'] = 'from_parent'
-        if cfg['stam']['mode'] == 'off':
-            raise ValueError('TTL requires STAM; omit stam.mode to read it from the parent checkpoint')
     if cfg['model_profile'] not in ('official_v1','pig_ordered_v1'): raise ValueError('Unknown model profile')
     if cfg['loss']['kind'] not in ('public_code','l1','physical_ssim'): raise ValueError('Unknown loss kind')
     if cfg['scheduler'] not in ('multistep','cosine','poly'): raise ValueError('Unknown scheduler')
@@ -95,7 +93,7 @@ def validate_train(cfg, stage=None):
         raise ValueError('stam.activation_checkpointing must be a boolean')
     if ttl_enabled:
         if stam['sam_checkpoint'] or cfg['init_weights']:
-            raise ValueError('TTL initializes inherited weights only from --init-from-stam')
+            raise ValueError('TTL needs Stage II parent weights from --init-from-stage2 or --init-from-stam')
         stam['train_policy'] = 'frozen'
     if stam['mode'] != 'off' and stam['train_policy'] != 'frozen':
         ratio = stam['backbone_lr_ratio']

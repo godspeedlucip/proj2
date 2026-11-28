@@ -81,6 +81,12 @@ class TTLSmokeTests(unittest.TestCase):
                     self.assertFalse(row['backbone_changed'])
 
     def test_frozen_parent_end_to_end(self):
+        self._frozen_parent_end_to_end('joint', '--init-from-stam')
+
+    def test_frozen_original_rstar_end_to_end(self):
+        self._frozen_parent_end_to_end('off', '--init-from-stage2')
+
+    def _frozen_parent_end_to_end(self, stam_mode, init_flag):
         import h5py
         import numpy as np
         from rstar4d.training.checkpoint import atomic_save, load_checkpoint
@@ -90,7 +96,8 @@ class TTLSmokeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            config, manifest, split, init = ttl_inputs(root)
+            config, manifest, split, init = ttl_inputs(root, stam_mode=stam_mode)
+            config['scheduler'] = 'poly'
             parent = init['path']
             value = load_checkpoint(parent, require_training=False)
             value['state_dict']['conv8.conv.conv3_2.bias'] += 2
@@ -102,11 +109,29 @@ class TTLSmokeTests(unittest.TestCase):
             last = run/'checkpoints/last.pt'
             self.run_cli('validate-data', '--manifest', manifest, '--split', split)
             self.run_cli('train', '--stage', 2, '--manifest', manifest, '--split', split, '--config', config_path,
-                         '--init-from-stam', parent, '--run-dir', run, '--stop-after-epoch', 1)
+                         init_flag, parent, '--run-dir', run, '--stop-after-epoch', 1)
             self.assertEqual(load_checkpoint(last)['step'], 2)
+            parent = parent.rename(root/'original_parent.pt')
             self.run_cli('train', '--resume', last)
-            self.assertEqual(load_checkpoint(last)['step'], 4)
+            trained = load_checkpoint(last)
+            self.assertEqual(trained['step'], 4)
+            self.assertEqual(trained['parent_checkpoint_sha256'], digest)
+            self.assertEqual(trained['ttl']['param_groups'], ['ttl'])
             self.assertEqual(sha256(parent), digest)
+            for key, tensor in value['state_dict'].items():
+                self.assertTrue(torch.equal(tensor, trained['state_dict'][key]), key)
+            self.assertTrue(torch.count_nonzero(trained['state_dict']['ttl.temporal.weight']))
+            if stam_mode == 'off':
+                self.assertNotIn('stam', trained)
+                self.assertEqual(trained['initialization']['kind'], 'stage2_parent')
+                self.assertFalse(any(key.startswith('stam.') for key in trained['state_dict']))
+                benchmark_path = root/'benchmark.json'
+                self.run_cli('benchmark', '--stage', 2, '--config', config_path, '--phase-count', 5,
+                             '--steps', 2, '--weights', parent, '--out', benchmark_path)
+                benchmark = read_json(benchmark_path)
+                self.assertEqual(benchmark['config']['stam']['mode'], 'off')
+                self.assertEqual(benchmark['results'][0]['trainable_parameters'], 1_887_136)
+                self.assertTrue(benchmark['results'][0]['parent_state_unchanged'])
             best = run/'checkpoints/best.pt'
 
             rows = {row['case_id']: row for row in read_jsonl(manifest)}
@@ -132,7 +157,10 @@ class TTLSmokeTests(unittest.TestCase):
                                  '--out', root/name/mode)
                 self.run_cli('evaluate', '--predictions', root/name/'tiled', '--manifest', manifest,
                              '--lv-annotations', annotations, '--lv-extractor', extractor, '--out', root/name/'eval')
-            self.assertEqual(read_jsonl(root/'B/tiled/manifest.jsonl')[0]['parent_checkpoint_sha256'], digest)
+            prediction = read_jsonl(root/'B/tiled/manifest.jsonl')[0]
+            self.assertEqual(prediction['parent_checkpoint_sha256'], digest)
+            self.assertEqual(prediction['stam_mode'], stam_mode)
+            self.assertEqual(prediction['ttl_mode'], 'full')
             seams = seam_report(root/'B/full', root/'B/tiled', tile, overlap)
             self.assertTrue(np.isfinite(seams['c']['seam_mae']))
             comparison = root/'B_vs_A.json'

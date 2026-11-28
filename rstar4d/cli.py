@@ -126,7 +126,7 @@ def _benchmark_updates(forward, optimizer, scaler, target, valid, stage, loss_co
 def benchmark(config, stage, t, steps, weights=None, temporal_topology=None):
     from .config import validate_train
     from .models import attach_stam, attach_ttl, create_model, forward_volume, initialize_stage2, model_from_checkpoint
-    from .training.trainer import _check_ttl_optimizer, load_stam_parent, make_optimizer, select_device
+    from .training.trainer import _check_ttl_optimizer, load_ttl_parent, make_optimizer, select_device
     from .utils.seed import seed_all
 
     if steps < 1 or t < 2:
@@ -141,20 +141,21 @@ def benchmark(config, stage, t, steps, weights=None, temporal_topology=None):
     weight_digest = None
     if ttl_enabled:
         if not weights:
-            raise ValueError('TTL benchmark requires --weights with a Stage II STAM parent checkpoint')
+            raise ValueError('TTL benchmark requires --weights with the matching Stage II parent checkpoint')
         if ttl['mode'] == 'local3' and temporal_topology not in ('ordered_states', 'cyclic'):
             raise ValueError('local3 benchmark requires an explicit --temporal-topology')
         seed_all(config['seed'], config['deterministic'], config['threads'])
-        first_parent, value, weight_digest = load_stam_parent(weights, config)
-        config['stam'].update(mode=first_parent.stam.mode, z_chunk_size=first_parent.stam.z_chunk_size,
-                              activation_checkpointing=first_parent.stam.activation_checkpointing)
+        first_parent, value, weight_digest = load_ttl_parent(weights, config)
+        if first_parent.stam is not None:
+            config['stam'].update(mode=first_parent.stam.mode, z_chunk_size=first_parent.stam.z_chunk_size,
+                                  activation_checkpointing=first_parent.stam.activation_checkpointing)
     else:
         value = torch.load(weights, map_location='cpu', weights_only=True) if weights else None
         if value is not None and (value.get('stage', stage) != stage or
                                   value.get('model_profile', config['model_profile']) != config['model_profile']):
             raise ValueError('Benchmark checkpoint stage or model profile differs from the configuration')
         if value is not None and value.get('ttl') is not None:
-            raise ValueError('Use the Stage II STAM parent weights to benchmark TTL')
+            raise ValueError('Use the original Stage II parent weights to benchmark TTL')
         if value is not None and value.get('stam') and config['stam']['mode'] == 'off':
             from_checkpoint = value.get('config', {}).get('stam', {})
             config = validate_train(dict(config, stam={
@@ -166,19 +167,19 @@ def benchmark(config, stage, t, steps, weights=None, temporal_topology=None):
     enabled = stam['mode'] != 'off'
     backbone_frozen = enabled and stam['train_policy'] != 'joint'
     results = []
-    sam_source = None
+    sam_source = (value.get('stam') or {}).get('sam_source') if ttl_enabled else None
     norm = config['normalization']
     loss_config = dict(config['loss'], normalization_scale=norm['scale'], normalization_offset=norm['offset'])
 
     for patch in patches:
         seed_all(config['seed'], config['deterministic'], config['threads'])
-        if value is not None and value.get('stam'):
+        if ttl_enabled:
+            model = first_parent if first_parent is not None else model_from_checkpoint(value)
+            first_parent = None
+        elif value is not None and value.get('stam'):
             if value['stam']['architecture']['mode'] != stam['mode']:
                 raise ValueError('Benchmark checkpoint STAM mode differs from the configuration')
-            if ttl_enabled and first_parent is not None:
-                model, first_parent = first_parent, None
-            else:
-                model = model_from_checkpoint(value, stage, config['model_profile'])
+            model = model_from_checkpoint(value, stage, config['model_profile'])
             model.stam.z_chunk_size = stam['z_chunk_size']
             model.stam.activation_checkpointing = stam['activation_checkpointing']
             sam_source = value['stam'].get('sam_source')

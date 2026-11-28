@@ -19,6 +19,19 @@ python -m rstar4d validate-data --manifest $manifest --split $split
 
 测试前锁定 TTL 学习率、日程、有效更新预算、精度、tile/overlap、评价配置与运动容许量。示例使用 AMP 和 tile `32 128 128`、overlap `16 64 64`。FP32 运行时，各组推理统一添加 `--fp32`。
 
+## 原版 RSTAR + TTL
+
+这条路径使用 `configs/train/pig_rstar_ttl_full.yaml`，其中 `stam.mode: 'off'`。指定原版 RSTAR Stage II 检查点后，训练只更新 `x2` 跳连上的 TTL，使用 Adam 和相同的逐轮 PolyLR。第零步验证、父 SHA-256、`best.pt`、`last.pt` 和续训沿用 TTL 的保存规则。
+
+```powershell
+python -m rstar4d train --stage 2 --config configs/train/pig_rstar_ttl_full.yaml --manifest $manifest --split $split --init-from-stage2 $rstarStage2Ckpt --run-dir runs/rstar_ttl
+python -m rstar4d train --resume runs/rstar_ttl/checkpoints/last.pt
+```
+
+`$rstarStage2Ckpt` 须为原版 Stage II 权重。若原文件只有参数，先用 `convert-weights --stage 2` 记录实际 profile、强度域、校准、归一化、动物划分和相位拓扑。资源预检使用同一配置，将 `benchmark --weights` 指向原版检查点。
+
+评估 TTL 的独立增益时，用同一个原版检查点直接推理作为基线，再用 `runs/rstar_ttl/checkpoints/best.pt` 预测相同病例，沿用相同推理与评价协议。
+
 ## 资源预检
 
 RTX A6000 模板使用 48 GB 显存配置、batch 1、FP16 AMP 和每步 1 个裁块。TTL 的 "z_chunk_size: 0" 让全部独立轴位层在一批中计算，三种裁块保持原方案。[RTX A6000 规格](https://www.nvidia.com/en-us/products/workstations/rtx-a6000/)
