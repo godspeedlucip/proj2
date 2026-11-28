@@ -157,10 +157,7 @@ def load_stam_parent(path, config):
     if value.get('model_profile') != config['model_profile']:
         raise ValueError('STAM parent model_profile differs from the configuration')
     _stam_mode(value, config['stam']['mode'])
-    model = model_from_checkpoint(value)
-    model.stam.z_chunk_size = config['stam']['z_chunk_size']
-    model.stam.activation_checkpointing = config['stam']['activation_checkpointing']
-    return model, value, sha256(path)
+    return model_from_checkpoint(value), value, sha256(path)
 
 
 def _validate_stage2_source(value, config, rows, data, stam_parent=False):
@@ -196,6 +193,32 @@ def _historical_best(path, saved):
             or best['best'] != saved['best'] or best['completed_epoch'] > saved['completed_epoch']):
         raise ValueError('best/last checkpoint lineage mismatch')
     return best
+
+
+def _validate_ttl_resume(saved, best, config, data, sig):
+    from ..models.ttl import architecture
+
+    if saved['data_snapshot'] != data or signature(validate_train(saved['config'], 2), data) != sig:
+        raise ValueError('TTL checkpoint data snapshot or resolved configuration differs')
+    digest = saved.get('parent_checkpoint_sha256')
+    expected = {'architecture': architecture(config['ttl']['mode']),
+                'freeze_policy': 'ttl_only', 'param_groups': ['ttl']}
+    for value in (saved, best):
+        if value.get('ttl') != expected:
+            raise ValueError('TTL checkpoint architecture, freeze policy or parameter groups differ')
+        source = value.get('initialization', {})
+        if (not isinstance(digest, str) or len(digest) != 64
+                or any(char not in '0123456789abcdef' for char in digest)
+                or value.get('parent_checkpoint_sha256') != digest
+                or source.get('sha256') != digest or source.get('kind') != 'stam_parent'):
+            raise ValueError('TTL best/last checkpoint parent lineage mismatch')
+        groups = value['optimizer']['param_groups']
+        if len(groups) != 1 or groups[0].get('name') != 'ttl':
+            raise ValueError('TTL checkpoint requires one TTL optimizer group')
+    if (saved['next_epoch'] != saved['completed_epoch'] + 1 or not 0 <= best['step'] <= saved['step']
+            or not 0 <= best['completed_epoch'] <= saved['completed_epoch']
+            or (best['completed_epoch'] == 0 and best['step'] != 0)):
+        raise ValueError('TTL best/last checkpoint progress mismatch')
 
 
 def _fork_prefix(path, saved, config, data, stage):
@@ -248,11 +271,14 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
             if saved.get('ttl', {}).get('architecture', {}).get('mode') != ttl_config['mode']:
                 raise ValueError('Training checkpoint TTL architecture mismatch')
             stam_config['mode'] = _stam_mode(saved, stam_config['mode'])
+            for key in ('z_chunk_size', 'activation_checkpointing'):
+                stam_config[key] = saved['config']['stam'][key]
         elif not parent_init:
             raise ValueError('TTL training requires --init-from-stam or --resume')
         else:
             parent_model, parent, parent_digest = load_stam_parent(init['path'], config)
-            stam_config['mode'] = parent_model.stam.mode
+            stam_config.update(mode=parent_model.stam.mode, z_chunk_size=parent_model.stam.z_chunk_size,
+                               activation_checkpointing=parent_model.stam.activation_checkpointing)
     elif saved and saved.get('ttl') is not None:
         raise ValueError('Training checkpoint TTL architecture mismatch')
     enabled = stam_config['mode'] != 'off'
@@ -264,7 +290,7 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
         identity_path=run_dir/'run_identity.json'
         if not identity_path.is_file() or read_json(identity_path).get('run_id')!=saved.get('run_id'):
             raise ValueError('Resume run ownership mismatch/missing run identity')
-        _historical_best(run_dir/'checkpoints/best.pt', saved)
+        historical_best = _historical_best(run_dir/'checkpoints/best.pt', saved)
         run_id=saved['run_id']
     else: run_id=str(uuid.uuid4())
     if not resume and run_dir.exists() and any(run_dir.iterdir()): raise FileExistsError('Training directory is nonempty; use resume or a new run')
@@ -275,6 +301,8 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
     if not training or not validation: raise ValueError('Training and validation animals/cases are both required')
     data=snapshot(rows,split); sig=signature(config,data)
     if resume and saved['signature']!=sig: raise ValueError('Resume rejected: data, split, algorithm/config or implementation changed; use an explicit warm start')
+    if resume and ttl_enabled:
+        _validate_ttl_resume(saved, historical_best, config, data, sig)
     parent_hash = saved.get('parent_checkpoint_sha256') if saved else None
     if fork_from:
         parent_best, parent_hash = _fork_prefix(fork_from, saved, config, data, stage)
@@ -344,6 +372,8 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
     step=0; best=math.inf
     if saved:
         optimizer.load_state_dict(saved['optimizer'])
+        if ttl_enabled:
+            _check_ttl_optimizer(model, optimizer)
         scheduler_state=copy.deepcopy(saved['scheduler'])
         if config['scheduler']=='multistep': scheduler_state['milestones']=Counter(scheduler_state['milestones'])
         scheduler.load_state_dict(scheduler_state); scaler.load_state_dict(saved['scaler'])
@@ -406,6 +436,8 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
             best = validate_model(model,validation,config,stage,samples,device)['l1']
             atomic_save(ckdir/'best.pt', checkpoint_payload(start_epoch - 1))
             append_jsonl(run_dir/'train.jsonl', {'event': 'initial_validation', 'epoch': start_epoch - 1, 'validation_l1': best})
+            if ttl_enabled:
+                configure_ttl_training(model)
         for epoch in range(start_epoch,final_epoch+1):
             begin = time.perf_counter()
             if ttl_enabled:

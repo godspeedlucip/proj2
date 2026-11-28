@@ -114,7 +114,9 @@ def validate_train(cfg, stage=None):
         raise ValueError('stage2_include_initial must be a boolean')
     if ttl_enabled and start != 1:
         raise ValueError('TTL training must start at Stage II epoch 1')
-    if not ttl_enabled and (start != 1 or cfg['stage2_include_initial']) and stam['mode'] != 'off':
+    if ttl_enabled:
+        cfg['stage2_include_initial'] = True
+    elif (start != 1 or cfg['stage2_include_initial']) and stam['mode'] != 'off':
         raise ValueError('Stage II control options require stam.mode=off')
     return cfg
 

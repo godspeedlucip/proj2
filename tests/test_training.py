@@ -47,6 +47,69 @@ def ttl_inputs(root):
 
 
 class TTLTrainingTests(unittest.TestCase):
+    def test_ttl_epoch0_can_win(self):
+        from unittest.mock import patch
+        from rstar4d.models import model_from_checkpoint
+        from rstar4d.utils.io import read_jsonl
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cfg, manifest, split, init = ttl_inputs(root)
+            validation = [dict(l1=l1, animal_l1=l1, cases={'b': l1}) for l1 in (0.25, 0.25, 0.5)]
+            with patch('rstar4d.training.trainer.validate_model', side_effect=validation) as checks:
+                result = train(cfg, manifest, split, root/'run', 2, init=init)
+            self.assertEqual(checks.call_count, 3)
+            best = load_checkpoint(result['checkpoint'])
+            self.assertEqual((best['completed_epoch'], best['step'], best['best']), (0, 0, 0.25))
+            self.assertEqual(best['ttl']['freeze_policy'], 'ttl_only')
+            self.assertEqual(best['ttl']['param_groups'], ['ttl'])
+            init['path'].rename(root/'moved-parent.pt')
+            model = model_from_checkpoint(best)
+            self.assertEqual(model.ttl.mode, 'full')
+            self.assertEqual(torch.count_nonzero(model.ttl.temporal.weight).item(), 0)
+            self.assertEqual(read_jsonl(root/'run/train.jsonl')[0]['event'], 'initial_validation')
+
+    def test_ttl_resume_matches_continuous(self):
+        import subprocess
+        import sys
+        from rstar4d.training.checkpoint import atomic_save
+        from rstar4d.utils.io import sha256
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cfg, manifest, split, init = ttl_inputs(root)
+            cfg['ttl']['z_chunk_size'] = 1
+            cfg['milestones']['2'] = [1]
+            parent_hash = sha256(init['path'])
+            continuous = train(cfg, manifest, split, root/'complete', 2, init=init)
+            partial = train(cfg, manifest, split, root/'partial', 2, init=init, stop_after_epoch=1)
+            saved = load_checkpoint(partial['last'])
+            bad = dict(saved, ttl=dict(saved['ttl'], freeze_policy='stam'))
+            atomic_save(partial['last'], bad)
+            with self.assertRaisesRegex(ValueError, 'freeze'):
+                train(cfg, manifest, split, root/'partial', 2, resume=partial['last'])
+            atomic_save(partial['last'], saved)
+            moved = init['path'].rename(root/'moved-parent.pt')
+            result = subprocess.run([sys.executable, '-m', 'rstar4d', 'train', '--resume', partial['last']],
+                                    capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for kind in ('checkpoint', 'last'):
+                a, b = load_checkpoint(continuous[kind]), load_checkpoint(partial[kind])
+                self.assertEqual(a['step'], b['step'])
+                self.assertEqual(a['best'], b['best'])
+                self.assertEqual(a['completed_epoch'], b['completed_epoch'])
+                self.assertEqual(a['scheduler'], b['scheduler'])
+                self.assertEqual(a['optimizer']['param_groups'], b['optimizer']['param_groups'])
+                self.assertEqual(a['parent_checkpoint_sha256'], b['parent_checkpoint_sha256'])
+                self.assertEqual(a['parent_checkpoint_sha256'], parent_hash)
+                for name, tensor in a['state_dict'].items():
+                    self.assertTrue(torch.equal(tensor, b['state_dict'][name]), name)
+                for key, state in a['optimizer']['state'].items():
+                    for field, value in state.items():
+                        self.assertTrue(torch.equal(value, b['optimizer']['state'][key][field]), field)
+            self.assertEqual(load_checkpoint(partial['last'])['step'], 4)
+            self.assertEqual(sha256(moved), parent_hash)
+
     def test_ttl_only_two_updates(self):
         from types import MethodType
         from unittest.mock import patch
