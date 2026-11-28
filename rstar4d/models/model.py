@@ -8,7 +8,7 @@ def is_z_parameter(name):
     return '.conv2.' in name or '.conv2_2.' in name
 
 
-def create_model(stage, profile='official_v1', stam=None):
+def create_model(stage, profile='official_v1', stam=None, ttl=None):
     if stage not in (1,2): raise ValueError('stage must be 1 or 2')
     if profile not in ('official_v1','pig_ordered_v1'): raise ValueError('Unknown model profile')
     model=(official_stage1 if stage==1 else official_stage2).myUNet()
@@ -20,6 +20,7 @@ def create_model(stage, profile='official_v1', stam=None):
         for name,p in model.named_parameters():
             if is_z_parameter(name): p.requires_grad_(False)
     attach_stam(model, stam)
+    attach_ttl(model, ttl)
     return model
 
 
@@ -33,6 +34,18 @@ def attach_stam(model, config, load_sam=False):
     source = block.sam.load_pretrained(config.get('sam_checkpoint')) if load_sam else None
     model.stam = block
     return source
+
+
+def attach_ttl(model, config):
+    if not config or config['mode'] == 'off':
+        return None
+    if model.stage != 2 or getattr(model, 'stam', None) is None:
+        raise ValueError('TTL requires a Stage II model with STAM')
+    if model.ttl is not None:
+        raise ValueError('This model already has TTL')
+    from .ttl import TemporalTransformerSkip
+    model.ttl = TemporalTransformerSkip(config['mode'], config.get('z_chunk_size', 0))
+    return model.ttl
 
 
 def model_from_checkpoint(value, stage=None, profile=None):
@@ -63,7 +76,7 @@ def initialize_stage2(model,state):
             p.requires_grad_(True)
 
 
-def forward_volume(model,x):
+def forward_volume(model,x,temporal_topology=None):
     if x.ndim!=6 or x.shape[1]!=2: raise ValueError('Expected [B,2,T,Z,Y,X]')
     if x.shape[2]<2: raise ValueError('At least two phases are required')
     b,c,t,z,y,w=x.shape
@@ -71,7 +84,8 @@ def forward_volume(model,x):
     pad=(0,(-w)%8,0,(-y)%8,0,pad_z)
     if any(pad):
         x=F.pad(x.reshape(b,c*t,z,y,w),pad,mode='replicate').reshape(b,c,t,z+pad_z,y+pad[3],w+pad[1])
-    out=model(x.contiguous())
+    x = x.contiguous()
+    out = model(x, temporal_topology=temporal_topology) if getattr(model, 'ttl', None) is not None else model(x)
     return out[:,:,:,:z,:y,:w]
 
 

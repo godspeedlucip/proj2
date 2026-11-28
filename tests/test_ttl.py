@@ -28,6 +28,68 @@ def slice_reference(ttl, x):
     return x + F.leaky_relu(ttl.temporal(restored), 0.2)
 
 
+class TTLStage2Tests(unittest.TestCase):
+    def setUp(self):
+        torch.set_num_threads(2)
+        torch.manual_seed(31)
+
+    def test_stage2_skip_routing(self):
+        from rstar4d.models import create_model, forward_volume
+
+        model = create_model(2, stam={'mode': 'temporal_only'}, ttl={'mode': 'full'}).eval()
+        torch.nn.init.normal_(model.ttl.temporal.weight, std=0.01)
+        features = {}
+
+        def capture(name, pre=False):
+            def hook(_module, args, output=None):
+                features[name] = (args[0] if pre else output).detach().clone()
+            return hook
+
+        model.conv3_3.register_forward_hook(capture('encoder_residual'))
+        model.conv3.register_forward_hook(capture('encoder_input'))
+        model.conv4.register_forward_pre_hook(capture('deep_input', pre=True))
+        model.conv5.register_forward_hook(capture('upsampled'))
+        model.conv5_2.register_forward_pre_hook(capture('fusion', pre=True))
+        with torch.no_grad():
+            output = forward_volume(model, torch.randn(1, 2, 11, 5, 17, 25))
+            self.assertEqual(list(output.shape), [1, 1, 11, 5, 17, 25])
+            encoder = features['encoder_input'] + features['encoder_residual']
+            torch.testing.assert_close(features['deep_input'], encoder)
+            skip = model.ttl(encoder)
+            self.assertFalse(torch.equal(skip, encoder))
+            torch.testing.assert_close(features['fusion'][:, :64], features['upsampled'])
+            torch.testing.assert_close(features['fusion'][:, 64:], skip)
+            self.assertEqual([n for n, m in model.named_modules() if isinstance(m, TemporalTransformerSkip)], ['ttl'])
+
+    def test_off_legacy_state_dict(self):
+        from rstar4d.config import validate_train
+        from rstar4d.models import create_model, forward_volume, model_from_checkpoint
+        from rstar4d.models.stam import architecture
+
+        structure = {'mode': 'temporal_only'}
+        original = create_model(2, stam=structure).eval()
+        torch.nn.init.normal_(original.stam.output_projection.weight, std=0.01)
+        value = {'stage': 2, 'state_dict': original.state_dict(),
+                 'stam': {'architecture': architecture(structure['mode'])}}
+        a = model_from_checkpoint(value).eval()
+        self.assertEqual(set(a.state_dict()), set(create_model(2, stam=structure, ttl={'mode': 'off'}).state_dict()))
+        self.assertFalse(any(name.startswith('ttl.') for name in a.state_dict()))
+        from rstar4d.models import attach_ttl
+        b = model_from_checkpoint(value)
+        attach_ttl(b, {'mode': 'full'})
+        b.eval()
+        with torch.no_grad():
+            x = torch.randn(1, 2, 11, 5, 17, 25)
+            self.assertTrue(torch.equal(forward_volume(original, x), forward_volume(a, x)))
+            self.assertTrue(torch.equal(forward_volume(a, x), forward_volume(b, x)))
+        self.assertEqual(validate_train({})['ttl']['mode'], 'off')
+        self.assertEqual(validate_train({'ttl': {'mode': 'full'}}, 2)['stam']['mode'], 'from_parent')
+        with self.assertRaisesRegex(ValueError, 'Stage II'):
+            validate_train({'ttl': {'mode': 'full'}}, 1)
+        with self.assertRaisesRegex(ValueError, 'STAM'):
+            create_model(2, ttl={'mode': 'full'})
+
+
 class TTLTests(unittest.TestCase):
     def setUp(self):
         torch.set_num_threads(2)
@@ -92,6 +154,7 @@ class TTLTests(unittest.TestCase):
             first = tokens + block.attention(block.norm1(tokens)) * masks[0]
             expected = first + block.mlp(block.norm2(first)) * masks[1]
             torch.testing.assert_close(block(tokens, None, masks), expected)
+            torch.nn.init.normal_(ttl.temporal.weight, std=0.01)
             torch.manual_seed(29)
             chunked = ttl(x)
             ttl.z_chunk_size = 0

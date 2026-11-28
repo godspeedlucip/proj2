@@ -78,6 +78,7 @@ class myUNet(nn.Module):
     def __init__(self):
         super(myUNet,self).__init__()
         self.stam = None
+        self.ttl = None
         cnum=16
         self.conv1=convwithactivation(2,cnum,kernel_size=[3,3,3],padding=[1,1,1],stride=[2,1,1],padding_mode='zeros')
         self.conv1_2=convwithactivation4DRSTAR(cnum,cnum,kernel_size=[3,3,3,3],padding=[1,1,1,1],stride=[1,1,1,1])
@@ -110,7 +111,7 @@ class myUNet(nn.Module):
         ##output
         self.conv8=upconvwithactivation(1*cnum,1,kernel_size=[3,3,3,3],stride=[1,1,1,1],padding=[1,1,1,1],scale_factor=[1,2,1,1],ifrelu=0)
 
-    def forward(self,x):
+    def forward(self,x,temporal_topology=None):
         x=self.conv1(x)
         x=self.conv1_3(self.conv1_2(x))+x
         x1=self.conv2(x)
@@ -123,7 +124,8 @@ class myUNet(nn.Module):
         if self.stam is not None:
             x3 = self.stam(x3)
         x3=self.conv5(x3)
-        x3=self.conv5_3(self.conv5_2(torch.cat([x3,x2],dim=1)))+x3
+        skip = x2 if self.ttl is None else self.ttl(x2, temporal_topology)
+        x3=self.conv5_3(self.conv5_2(torch.cat([x3,skip],dim=1)))+x3
         x3=self.conv6(x3)
         x3=self.conv6_3(self.conv6_2(torch.cat([x3,x1],dim=1)))+x3
         x3=self.conv7(x3)

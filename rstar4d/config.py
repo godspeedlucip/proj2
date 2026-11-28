@@ -19,6 +19,7 @@ def train_defaults():
         'accumulation':1,'clip_grad':None,'temporal_roll':False,'init_weights':None,
         'stam':{'mode':'off','train_policy':'frozen','sam_checkpoint':None,
                 'warmup_epochs':10,'backbone_lr_ratio':.1,'z_chunk_size':1,'activation_checkpointing':True},
+        'ttl':{'mode':'off','z_chunk_size':0},
         'stage2_start_epoch':1,'stage2_include_initial':False}
 
 
@@ -46,7 +47,21 @@ def merge_strict(defaults,values,path=''):
 
 
 def validate_train(cfg, stage=None):
+    explicit_stam = cfg.get('stam', {})
     cfg=merge_strict(train_defaults(),cfg)
+    ttl = cfg['ttl']
+    if ttl['mode'] not in ('off', 'full', 'local3'):
+        raise ValueError('Unknown ttl.mode')
+    if type(ttl['z_chunk_size']) is not int or ttl['z_chunk_size'] < 0:
+        raise ValueError('ttl.z_chunk_size must be a nonnegative integer')
+    ttl_enabled = ttl['mode'] != 'off'
+    if ttl_enabled:
+        if stage == 1:
+            raise ValueError('TTL is supported only in Stage II')
+        if 'mode' not in explicit_stam:
+            cfg['stam']['mode'] = 'from_parent'
+        if cfg['stam']['mode'] == 'off':
+            raise ValueError('TTL requires STAM; omit stam.mode to read it from the parent checkpoint')
     if cfg['model_profile'] not in ('official_v1','pig_ordered_v1'): raise ValueError('Unknown model profile')
     if cfg['loss']['kind'] not in ('public_code','l1','physical_ssim'): raise ValueError('Unknown loss kind')
     if cfg['scheduler'] not in ('multistep','cosine'): raise ValueError('Unknown scheduler')
@@ -65,7 +80,8 @@ def validate_train(cfg, stage=None):
         if len(patch)!=3 or any(not isinstance(v,int) or v<1 for v in patch): raise ValueError('Invalid patch shape')
     if not cfg['stage2_patches']: raise ValueError('No Stage II patches')
     stam = cfg['stam']
-    if stam['mode'] not in ('off', 'temporal_only', 'joint'):
+    allowed_modes = ('off', 'temporal_only', 'joint') + (('from_parent',) if ttl_enabled else ())
+    if stam['mode'] not in allowed_modes:
         raise ValueError('Unknown stam.mode')
     if stam['mode'] != 'off' and stage == 1:
         raise ValueError('STAM is supported only in Stage II')
@@ -92,7 +108,9 @@ def validate_train(cfg, stage=None):
         raise ValueError('stage2_start_epoch must be inside the Stage II epoch budget')
     if type(cfg['stage2_include_initial']) is not bool:
         raise ValueError('stage2_include_initial must be a boolean')
-    if (start != 1 or cfg['stage2_include_initial']) and stam['mode'] != 'off':
+    if ttl_enabled and start != 1:
+        raise ValueError('TTL training must start at Stage II epoch 1')
+    if not ttl_enabled and (start != 1 or cfg['stage2_include_initial']) and stam['mode'] != 'off':
         raise ValueError('Stage II control options require stam.mode=off')
     return cfg
 
@@ -100,7 +118,7 @@ def validate_train(cfg, stage=None):
 def load_config(path=None,kind='train'):
     defaults={'train':train_defaults,'simulation':simulation_defaults,'metrics':metric_defaults}[kind]()
     data={} if path is None else yaml.safe_load(Path(path).read_text(encoding='utf-8-sig')) or {}
-    cfg=merge_strict(defaults,data)
+    cfg=validate_train(data) if kind=='train' else merge_strict(defaults,data)
     if path:
         base=Path(path).resolve().parent
         for key in ['settings_root','settings_csv','cycle_csv','init_weights']:
