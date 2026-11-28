@@ -61,7 +61,15 @@ def model_from_checkpoint(value, stage=None, profile=None):
             raise ValueError('Unsupported STAM architecture in checkpoint')
         execution = value.get('config', {}).get('stam', {})
         structure = {**execution, **structure}
-    model = create_model(stage, profile, structure)
+    ttl_structure = None
+    if value.get('ttl') is not None:
+        from .ttl import architecture as ttl_architecture
+        ttl_structure = value['ttl'].get('architecture', {})
+        mode = ttl_structure.get('mode')
+        if mode not in ('full', 'local3') or ttl_structure != ttl_architecture(mode):
+            raise ValueError('Unsupported TTL architecture in checkpoint')
+        ttl_structure = {**value.get('config', {}).get('ttl', {}), **ttl_structure}
+    model = create_model(stage, profile, structure, ttl_structure)
     model.load_state_dict(value.get('state_dict', value), strict=True)
     return model
 

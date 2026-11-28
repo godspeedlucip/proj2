@@ -12,7 +12,7 @@ import uuid
 import torch
 from torch.utils.data import DataLoader
 from ..config import validate_train
-from ..models import attach_stam, create_model, forward_volume, initialize_stage2, model_from_checkpoint
+from ..models import attach_stam, attach_ttl, create_model, forward_volume, initialize_stage2, model_from_checkpoint
 from ..data.contracts import validate_manifest, validate_split, snapshot
 from ..data.sampling import PatchDataset, validation_samples
 from ..utils.io import atomic_json, append_jsonl, read_json, canonical_hash, sha256, code_fingerprint, environment
@@ -76,9 +76,36 @@ def _write_metrics_csv(path,row):
         writer.writerow({k:row[k] for k in keys})
 
 
+def configure_ttl_training(model):
+    from ..models.ttl import TRAINABLE_PARAMETERS
+
+    if getattr(model, 'ttl', None) is None:
+        raise ValueError('TTL-only training requires an attached TTL')
+    model.requires_grad_(False)
+    model.eval()
+    model.ttl.requires_grad_(True)
+    model.ttl.train()
+    parameters = list(model.ttl.parameters())
+    if sum(p.numel() for p in parameters) != TRAINABLE_PARAMETERS:
+        raise RuntimeError('Unexpected TTL parameter count')
+    return parameters
+
+
+def _check_ttl_optimizer(model, optimizer):
+    expected = {id(p) for p in model.ttl.parameters()}
+    trainable = {id(p) for p in model.parameters() if p.requires_grad}
+    groups = optimizer.param_groups
+    if (len(groups) != 1 or groups[0].get('name') != 'ttl'
+            or len(groups[0]['params']) != len(expected)
+            or {id(p) for p in groups[0]['params']} != expected or trainable != expected):
+        raise RuntimeError('Optimizer and trainable parameters must exactly match TTL')
+
+
 def make_optimizer(model, config, backbone_frozen=False):
     block = getattr(model, 'stam', None)
-    if block is None:
+    if getattr(model, 'ttl', None) is not None:
+        parameters = [{'name': 'ttl', 'params': configure_ttl_training(model)}]
+    elif block is None:
         parameters = [p for p in model.parameters() if p.requires_grad]
     else:
         backbone = list(_backbone(model))
@@ -112,22 +139,52 @@ def _group_names(optimizer):
     return [group['name'] for group in optimizer.param_groups]
 
 
-def _validate_stage2_source(value, config, rows, data):
+def _stam_mode(value, requested):
+    mode = (value.get('stam') or {}).get('architecture', {}).get('mode')
+    if mode not in ('joint', 'temporal_only'):
+        raise ValueError('Expected an existing Stage II STAM checkpoint with architecture metadata')
+    if requested not in ('from_parent', mode):
+        raise ValueError(f'Configured STAM mode {requested!r} differs from checkpoint mode {mode!r}')
+    return mode
+
+
+def load_stam_parent(path, config):
+    value = load_checkpoint(path, require_training=False)
+    if value.get('ttl') is not None:
+        raise ValueError('TTL initialization requires a STAM parent without TTL')
+    if value.get('stage') != 2:
+        raise ValueError('TTL initialization requires a Stage II STAM checkpoint')
+    if value.get('model_profile') != config['model_profile']:
+        raise ValueError('STAM parent model_profile differs from the configuration')
+    _stam_mode(value, config['stam']['mode'])
+    model = model_from_checkpoint(value)
+    model.stam.z_chunk_size = config['stam']['z_chunk_size']
+    model.stam.activation_checkpointing = config['stam']['activation_checkpointing']
+    return model, value, sha256(path)
+
+
+def _validate_stage2_source(value, config, rows, data, stam_parent=False):
+    source = 'STAM parent' if stam_parent else 'Original Stage II initialization'
     expected = {'stage': 2, 'model_profile': config['model_profile'], 'normalization': config['normalization']}
     for key in ('intensity_domain', 'calibration_application'):
         expected[key] = rows[0]['metadata'][key]
     for key, target in expected.items():
         if value.get(key) != target:
-            raise ValueError(f'Original Stage II initialization {key} missing or incompatible')
+            raise ValueError(f'{source} {key} missing or incompatible')
     if value.get('split') is None or validate_split(rows, value['split']) != data['split']:
-        raise ValueError('Original Stage II initialization split missing or incompatible')
-    if value.get('data_snapshot', data) != data:
-        raise ValueError('Original Stage II initialization data snapshot differs')
+        raise ValueError(f'{source} split missing or incompatible')
+    if value.get('data_snapshot', None if stam_parent else data) != data:
+        raise ValueError(f'{source} data snapshot missing or differs')
     topologies = sorted({row['metadata']['temporal_topology'] for row in rows})
     known_topologies = value.get('temporal_topologies', topologies if 'data_snapshot' in value else None)
     if known_topologies != topologies:
-        raise ValueError('Original Stage II initialization temporal topology differs')
-    if value.get('stam') is not None:
+        raise ValueError(f'{source} temporal topology differs')
+    if stam_parent:
+        parent_config = value.get('config', {})
+        for field in ('loss', 'temporal_roll'):
+            if parent_config.get(field) != config[field]:
+                raise ValueError(f'STAM parent {field} missing or differs from the configuration')
+    elif value.get('stam') is not None:
         raise ValueError('STAM requires original Stage II initialization weights')
 
 
@@ -177,9 +234,28 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
     if sum(value is not None for value in (resume, init, fork_from)) > 1:
         raise ValueError('resume, fork-from and initialization are mutually exclusive')
     stam_config = config['stam']
-    enabled = stam_config['mode'] != 'off'
+    ttl_config = config['ttl']
+    ttl_enabled = ttl_config['mode'] != 'off'
+    parent_init = init is not None and init.get('kind') == 'stam_parent'
     saved = load_checkpoint(resume or fork_from) if resume or fork_from else None
     if saved and saved['stage']!=stage: raise ValueError('Checkpoint stage mismatch')
+    if fork_from and (ttl_enabled or saved.get('ttl') is not None):
+        raise ValueError('TTL training supports resume, not --fork-from')
+    if parent_init and (not ttl_enabled or stage != 2 or init.get('source_stage') != 2):
+        raise ValueError('--init-from-stam requires Stage II and ttl.mode=full or local3')
+    if ttl_enabled:
+        if saved:
+            if saved.get('ttl', {}).get('architecture', {}).get('mode') != ttl_config['mode']:
+                raise ValueError('Training checkpoint TTL architecture mismatch')
+            stam_config['mode'] = _stam_mode(saved, stam_config['mode'])
+        elif not parent_init:
+            raise ValueError('TTL training requires --init-from-stam or --resume')
+        else:
+            parent_model, parent, parent_digest = load_stam_parent(init['path'], config)
+            stam_config['mode'] = parent_model.stam.mode
+    elif saved and saved.get('ttl') is not None:
+        raise ValueError('Training checkpoint TTL architecture mismatch')
+    enabled = stam_config['mode'] != 'off'
     if resume:
         # Migration is supported by moving/copying the whole run, never by injecting
         # one checkpoint into an unrelated destination or losing its historical best.
@@ -212,9 +288,18 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
         if bool(saved_stam) != enabled or (enabled and saved_stam['architecture']['mode'] != stam_config['mode']):
             raise ValueError('Training checkpoint STAM architecture mismatch')
         if enabled:
-            sam_source = saved_stam['sam_source']
+            sam_source = saved_stam.get('sam_source')
         model = model_from_checkpoint(saved)
         initialization=saved['initialization']
+    elif ttl_enabled:
+        _validate_stage2_source(parent, config, rows, data, stam_parent=True)
+        model = parent_model
+        attach_ttl(model, ttl_config)
+        sam_source = parent['stam'].get('sam_source')
+        parent_hash = parent_digest
+        initialization = {'kind': 'stam_parent', 'source_stage': 2, 'sha256': parent_hash,
+                          'path': str(Path(init['path']).resolve())}
+        del parent
     else:
         model=create_model(stage,config['model_profile'])
         if (enabled or (stage == 2 and (config['stage2_start_epoch'] != 1 or config['stage2_include_initial']))) and (
@@ -243,6 +328,8 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
     backbone_frozen = enabled and (policy == 'frozen' or (
         policy == 'joint_after_warmup' and (not saved or saved['completed_epoch'] <= warmup)))
     optimizer = make_optimizer(model, config, backbone_frozen)
+    if ttl_enabled:
+        _check_ttl_optimizer(model, optimizer)
     if enabled and saved:
         names = _group_names(optimizer)
         if (saved_stam['backbone_frozen'] != backbone_frozen or saved_stam['param_groups'] != names
@@ -291,6 +378,8 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
     loss_config={**config['loss'],'normalization_scale':config['normalization']['scale'],'normalization_offset':config['normalization']['offset']}
     if enabled:
         from ..models.stam import architecture
+    if ttl_enabled:
+        from ..models.ttl import architecture as ttl_architecture
 
     def checkpoint_payload(epoch):
         payload={'schema_version':1,'checkpoint_kind':'training','run_id':run_id,'state_dict':model.state_dict(),'stage':stage,
@@ -307,6 +396,9 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
                                'warmup_epochs': warmup, 'backbone_frozen': backbone_frozen, 'sam_frozen': True,
                                'param_groups': _group_names(optimizer), 'sam_source': sam_source}
             payload['parent_checkpoint_sha256'] = parent_hash
+        if ttl_enabled:
+            payload['ttl'] = {'architecture': ttl_architecture(ttl_config['mode']),
+                              'freeze_policy': 'ttl_only', 'param_groups': _group_names(optimizer)}
         return payload
 
     try:
@@ -315,8 +407,13 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
             atomic_save(ckdir/'best.pt', checkpoint_payload(start_epoch - 1))
             append_jsonl(run_dir/'train.jsonl', {'event': 'initial_validation', 'epoch': start_epoch - 1, 'validation_l1': best})
         for epoch in range(start_epoch,final_epoch+1):
-            begin=time.perf_counter(); model.train()
-            if enabled and backbone_frozen and policy == 'joint_after_warmup' and epoch == warmup + 1:
+            begin = time.perf_counter()
+            if ttl_enabled:
+                configure_ttl_training(model)
+                _check_ttl_optimizer(model, optimizer)
+            else:
+                model.train()
+            if enabled and not ttl_enabled and backbone_frozen and policy == 'joint_after_warmup' and epoch == warmup + 1:
                 _unfreeze_backbone(model, optimizer, scheduler, config)
                 backbone_frozen = False
             rates_used = {group['name']: group['lr'] for group in optimizer.param_groups} if enabled else None
@@ -360,6 +457,8 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
                 raise ValueError('No valid SSIM windows during entire epoch; change explicit patch/mask/loss configuration')
             if epoch_updates==0: raise FloatingPointError('No optimizer updates in epoch: AMP overflow calibration exhausted the tiny epoch; use more draws or explicit fp32')
             evaluation=validate_model(model,validation,config,stage,samples,device)
+            if ttl_enabled:
+                configure_ttl_training(model)
             improved=evaluation['l1']<best
             if improved: best=evaluation['l1']
             lr_used=optimizer.param_groups[0]['lr']; scheduler.step()
@@ -376,7 +475,7 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
             payload = checkpoint_payload(epoch)
             if improved: atomic_save(ckdir/'best.pt',payload)
             atomic_save(ckdir/'last.pt',payload)
-            if enabled and backbone_frozen and epoch == prefix_epoch:
+            if enabled and not ttl_enabled and backbone_frozen and epoch == prefix_epoch:
                 warmup_dir = ckdir/'warmup'
                 atomic_save(warmup_dir/'best.pt', _historical_best(ckdir/'best.pt', payload))
                 atomic_save(warmup_dir/'last.pt', payload)

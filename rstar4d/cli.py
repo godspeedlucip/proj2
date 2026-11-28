@@ -30,7 +30,7 @@ def parser():
         d=sub.add_parser(command); d.add_argument('--config'); d.add_argument('--manifest'); d.add_argument('--split'); d.add_argument('--run-dir')
         if command=='train':
             d.add_argument('--stage',type=int,choices=[1,2]); d.add_argument('--stop-after-epoch',type=int)
-            group=d.add_mutually_exclusive_group(); group.add_argument('--resume'); group.add_argument('--init-from-stage1'); group.add_argument('--init-from-stage2'); group.add_argument('--fork-from')
+            group=d.add_mutually_exclusive_group(); group.add_argument('--resume'); group.add_argument('--init-from-stage1'); group.add_argument('--init-from-stage2'); group.add_argument('--init-from-stam'); group.add_argument('--fork-from')
     d=sub.add_parser('infer'); d.add_argument('--checkpoint',required=True); d.add_argument('--manifest',required=True); d.add_argument('--out',required=True)
     d.add_argument('--split'); d.add_argument('--split-name',choices=['train','val','test','all'],default='test'); d.add_argument('--mode',choices=['full','tiled'],default='tiled')
     d.add_argument('--tile',nargs=3,type=int,default=[32,128,128]); d.add_argument('--overlap',nargs=3,type=int,default=[16,64,64]); d.add_argument('--device',default='cuda'); d.add_argument('--fp32',action='store_true'); d.add_argument('--export',nargs='+',choices=['h5','tif','nii'],default=['h5'])
@@ -252,6 +252,7 @@ def dispatch(args):
         init=None
         if args.init_from_stage1: init={'path':args.init_from_stage1,'source_stage':1}
         if args.init_from_stage2: init={'path':args.init_from_stage2,'source_stage':2}
+        if args.init_from_stam: init={'kind':'stam_parent','path':args.init_from_stam,'source_stage':2}
         return train(cfg,args.manifest,args.split,args.run_dir,args.stage,init=init,stop_after_epoch=args.stop_after_epoch,fork_from=args.fork_from)
     if command=='infer':
         from .inference.predict import predict_manifest

@@ -22,6 +22,89 @@ def inputs(root):
     return cfg,root/'manifest.jsonl',root/'split.json'
 
 
+def ttl_inputs(root):
+    from rstar4d.data.contracts import snapshot, validate_manifest
+    from rstar4d.models import create_model
+    from rstar4d.models.stam import architecture
+    from rstar4d.training.checkpoint import atomic_save
+    from rstar4d.utils.io import read_json
+
+    cfg, manifest, split = inputs(root)
+    torch.manual_seed(11)
+    mode = 'joint'
+    parent = create_model(2, stam={'mode': mode})
+    torch.nn.init.normal_(parent.stam.output_projection.weight, std=0.005)
+    torch.nn.init.normal_(parent.stam.temporal_adapter.up.weight, std=0.01)
+    path = root/'parent.pt'
+    groups = read_json(split)
+    atomic_save(path, dict(schema_version=1, checkpoint_kind='weights', stage=2,
+        model_profile=cfg['model_profile'], state_dict=parent.state_dict(),
+        normalization=cfg['normalization'], intensity_domain='mu', calibration_application='none',
+        config=cfg, split=groups, data_snapshot=snapshot(validate_manifest(manifest), groups),
+        temporal_topologies=['ordered_states'], stam={'architecture': architecture(mode)}))
+    cfg.update(ttl={'mode': 'full'}, stam={'mode': 'from_parent'})
+    return cfg, manifest, split, {'kind': 'stam_parent', 'source_stage': 2, 'path': path}
+
+
+class TTLTrainingTests(unittest.TestCase):
+    def test_ttl_only_two_updates(self):
+        from types import MethodType
+        from unittest.mock import patch
+        from rstar4d.training.trainer import make_optimizer
+        from rstar4d.utils.io import sha256
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cfg, manifest, split, init = ttl_inputs(root)
+            cfg['epochs']['2'] = 1
+            parent = load_checkpoint(init['path'], require_training=False)
+            before_hash = sha256(init['path'])
+            updates = []
+
+            def audited_optimizer(model, *args):
+                optimizer = make_optimizer(model, *args)
+                self.assertEqual([group['name'] for group in optimizer.param_groups], ['ttl'])
+                ids = {id(p) for p in optimizer.param_groups[0]['params']}
+                self.assertEqual(ids, {id(p) for p in model.ttl.parameters()})
+                self.assertEqual(ids, {id(p) for p in model.parameters() if p.requires_grad})
+                self.assertEqual(sum(p.numel() for p in model.ttl.parameters()), 1_887_136)
+                step = optimizer.step
+
+                def audit_step(_optimizer, *args, **kwargs):
+                    for name, module in model.named_modules():
+                        self.assertEqual(module.training, name == 'ttl' or name.startswith('ttl.'), name)
+                    for name, param in model.named_parameters():
+                        if id(param) not in ids:
+                            self.assertIsNone(param.grad, name)
+                    params = dict(model.ttl.named_parameters())
+                    active = ('temporal.weight',) if not updates else (
+                        'embed.weight', 'blocks.0.qkv.weight', 'blocks.1.mlp.0.weight', 'unembed.weight')
+                    for name in active:
+                        grad = params[name].grad
+                        self.assertIsNotNone(grad, name)
+                        self.assertTrue(torch.isfinite(grad).all() and grad.abs().max() > 0, name)
+                    before = params['temporal.weight'].detach().clone()
+                    result = step(*args, **kwargs)
+                    self.assertFalse(torch.equal(before, params['temporal.weight']))
+                    for name, tensor in model.state_dict().items():
+                        if not name.startswith('ttl.'):
+                            self.assertTrue(torch.equal(tensor, parent['state_dict'][name]), name)
+                    updates.append(True)
+                    return result
+
+                optimizer.step = MethodType(audit_step, optimizer)
+                return optimizer
+
+            with patch('rstar4d.training.trainer.make_optimizer', side_effect=audited_optimizer):
+                result = train(cfg, manifest, split, root/'run', 2, init=init)
+            self.assertEqual(len(updates), 2)
+            child = load_checkpoint(result['last'])
+            self.assertEqual(child['step'], 2)
+            self.assertEqual(child['parent_checkpoint_sha256'], before_hash)
+            self.assertEqual(sha256(init['path']), before_hash)
+            self.assertEqual(child['stam']['architecture']['mode'], 'joint')
+
+
 class TrainingTests(unittest.TestCase):
     def test_nonfinite_output_records_failure_without_checkpoint(self):
         from unittest.mock import patch

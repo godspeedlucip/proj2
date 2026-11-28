@@ -93,6 +93,10 @@ def validate_train(cfg, stage=None):
         raise ValueError('stam.z_chunk_size must be a nonnegative integer')
     if type(stam['activation_checkpointing']) is not bool:
         raise ValueError('stam.activation_checkpointing must be a boolean')
+    if ttl_enabled:
+        if stam['sam_checkpoint'] or cfg['init_weights']:
+            raise ValueError('TTL initializes inherited weights only from --init-from-stam')
+        stam['train_policy'] = 'frozen'
     if stam['mode'] != 'off' and stam['train_policy'] != 'frozen':
         ratio = stam['backbone_lr_ratio']
         if type(ratio) not in (int, float) or not math.isfinite(ratio) or ratio <= 0:
