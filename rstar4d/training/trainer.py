@@ -46,6 +46,12 @@ def _loader(dataset,config,epoch,stage):
         pin_memory=config['pin_memory'],generator=generator,persistent_workers=False)
 
 
+def _forward_patch(model, x, batch):
+    if getattr(model, 'ttl', None) is not None:
+        return forward_volume(model, x, temporal_topology=batch['temporal_topology'])
+    return forward_volume(model, x)
+
+
 def validate_model(model,records,config,stage,samples,device):
     data=PatchDataset(records,config,stage,0,len(samples),samples)
     cases=defaultdict(lambda:{'sum':0.,'count':0,'animal_id':None})
@@ -53,7 +59,7 @@ def validate_model(model,records,config,stage,samples,device):
     with torch.no_grad():
         for batch in _loader(data,config,0,stage):
             x=batch['input'].to(device); target=batch['target'].to(device); valid=batch['valid'].to(device)
-            with _amp(device,config['amp']): pred=forward_volume(model,x)
+            with _amp(device,config['amp']): pred=_forward_patch(model,x,batch)
             if not torch.isfinite(pred).all(): raise FloatingPointError(f'Nonfinite validation output: {batch["case_id"]}')
             item=cases[batch['case_id'][0]]
             item['sum']+=float((pred.float()-target).abs()[valid].sum())
@@ -457,7 +463,7 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
             for index,batch in enumerate(loader):
                 x=batch['input'].to(device); target=batch['target'].to(device); valid=batch['valid'].to(device)
                 shape_counts['x'.join(map(str,x.shape[2:]))]+=1; animal_counts[batch['animal_id'][0]]+=1
-                with _amp(device,config['amp']): pred=forward_volume(model,x)
+                with _amp(device,config['amp']): pred=_forward_patch(model,x,batch)
                 loss=compute_loss(pred,target,valid,stage,loss_config)
                 if not torch.isfinite(loss['total']): raise FloatingPointError(f'Nonfinite loss at {batch["case_id"]}, epoch={epoch}, draw={index}')
                 # Average over the actual size of each accumulation group, including the final short group.

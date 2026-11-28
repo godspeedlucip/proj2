@@ -12,8 +12,9 @@ from rstar4d.training.checkpoint import load_checkpoint
 from rstar4d.utils.io import atomic_json
 
 
-def inputs(root):
-    rows=[fixture(root,10,'a','a'),fixture(root,11,'b','b'),fixture(root,10,'c','c')]
+def inputs(root, topologies=('ordered_states',) * 3):
+    rows = [fixture(root, t, name, name, temporal_topology=topology)
+            for t, name, topology in zip((10, 11, 10), 'abc', topologies)]
     write_manifest(root/'manifest.jsonl',rows)
     atomic_json(root/'split.json',{'train':['a'],'val':['b'],'test':['c']})
     cfg=train_defaults(); cfg.update(device='cpu',amp=False,deterministic=True,threads=1,
@@ -22,14 +23,14 @@ def inputs(root):
     return cfg,root/'manifest.jsonl',root/'split.json'
 
 
-def ttl_inputs(root):
+def ttl_inputs(root, topologies=('ordered_states',) * 3):
     from rstar4d.data.contracts import snapshot, validate_manifest
     from rstar4d.models import create_model
     from rstar4d.models.stam import architecture
     from rstar4d.training.checkpoint import atomic_save
     from rstar4d.utils.io import read_json
 
-    cfg, manifest, split = inputs(root)
+    cfg, manifest, split = inputs(root, topologies)
     torch.manual_seed(11)
     mode = 'joint'
     parent = create_model(2, stam={'mode': mode})
@@ -41,12 +42,26 @@ def ttl_inputs(root):
         model_profile=cfg['model_profile'], state_dict=parent.state_dict(),
         normalization=cfg['normalization'], intensity_domain='mu', calibration_application='none',
         config=cfg, split=groups, data_snapshot=snapshot(validate_manifest(manifest), groups),
-        temporal_topologies=['ordered_states'], stam={'architecture': architecture(mode)}))
+        temporal_topologies=sorted(set(topologies)), stam={'architecture': architecture(mode)}))
     cfg.update(ttl={'mode': 'full'}, stam={'mode': 'from_parent'})
     return cfg, manifest, split, {'kind': 'stam_parent', 'source_stage': 2, 'path': path}
 
 
 class TTLTrainingTests(unittest.TestCase):
+    def test_local3_training_uses_each_cases_topology(self):
+        from unittest.mock import patch
+        from rstar4d.models import forward_volume
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cfg, manifest, split, init = ttl_inputs(root, ('cyclic', 'ordered_states', 'ordered_states'))
+            cfg['ttl']['mode'] = 'local3'
+            cfg['epochs']['2'] = 1
+            with patch('rstar4d.training.trainer.forward_volume', wraps=forward_volume) as calls:
+                train(cfg, manifest, split, root/'run', 2, init=init)
+            self.assertEqual([tuple(call.kwargs['temporal_topology']) for call in calls.call_args_list],
+                             [('ordered_states',), ('cyclic',), ('cyclic',), ('ordered_states',)])
+
     def test_ttl_epoch0_can_win(self):
         from unittest.mock import patch
         from rstar4d.models import model_from_checkpoint

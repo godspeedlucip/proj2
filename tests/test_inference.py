@@ -23,6 +23,54 @@ class InferenceTests(unittest.TestCase):
             np.testing.assert_allclose(out,a,rtol=2e-6,atol=1e-8)
             self.assertEqual(out.shape,a.shape)
 
+    def test_local3_manifest_preserves_topology_and_checkpoint_outputs(self):
+        from tests.test_data import fixture
+        from rstar4d.data.contracts import write_manifest
+        from rstar4d.inference.predict import predict_manifest
+        from rstar4d.models import create_model, forward_volume
+        from rstar4d.models.stam import architecture as stam_architecture
+        from rstar4d.models.ttl import architecture as ttl_architecture
+        from rstar4d.training.checkpoint import atomic_save
+        from validation.run_stam_smoke import seam_report
+
+        torch.set_num_threads(1)
+        torch.manual_seed(21)
+        with tempfile.TemporaryDirectory() as d, torch.no_grad():
+            root = Path(d)
+            topologies = ('ordered_states', 'cyclic')
+            rows = [fixture(root, 5, label, label, (3, 17, 19), label) for label in topologies]
+            manifest = root/'manifest.jsonl'
+            write_manifest(manifest, rows)
+            model = create_model(2, stam={'mode': 'temporal_only'}, ttl={'mode': 'local3'}).eval()
+            torch.nn.init.normal_(model.ttl.temporal.weight, std=0.02)
+            norm = {'scale': 0.02, 'offset': 0.0}
+            with h5py.File(rows[0]['path']) as f:
+                cbct, prior = f['cbct'][:], f['prior'][:]
+            x = torch.from_numpy(np.stack([cbct / .02, np.broadcast_to(prior / .02, cbct.shape)]))[None]
+            direct = {label: forward_volume(model, x, label)[0, 0].numpy() * .02 for label in topologies}
+            self.assertGreater(np.max(np.abs(direct['cyclic'][0] - direct['ordered_states'][0])), 1e-7)
+            checkpoint = root/'child.pt'
+            atomic_save(checkpoint, dict(schema_version=1, checkpoint_kind='weights', stage=2,
+                model_profile='official_v1', normalization=norm, intensity_domain='mu',
+                stam={'architecture': stam_architecture('temporal_only')},
+                ttl={'architecture': ttl_architecture('local3')}, state_dict=model.state_dict()))
+            tile, overlap = (4, 16, 16), (2, 8, 8)
+            for mode in ('full', 'tiled'):
+                predict_manifest(checkpoint, manifest, root/mode, 'all', mode, tile, overlap, 'cpu', False)
+                predictions = {}
+                for label in topologies:
+                    expected = predict_volume(model, cbct, prior, norm, mode, tile, overlap,
+                                              'cpu', False, temporal_topology=label)
+                    with h5py.File(root/mode/label/'prediction.h5') as f:
+                        predictions[label] = f['prediction'][:]
+                    np.testing.assert_array_equal(predictions[label], expected)
+                    if mode == 'full':
+                        np.testing.assert_array_equal(expected, direct[label])
+                self.assertGreater(np.max(np.abs(predictions['cyclic'][0] - predictions['ordered_states'][0])), 1e-7)
+            seams = seam_report(root/'full', root/'tiled', tile, overlap)
+            self.assertEqual(set(seams), set(topologies))
+            self.assertTrue(all(np.isfinite(row['seam_mae']) for row in seams.values()))
+
     def test_metric_units_empty_roi_and_window_mask(self):
         a=np.full((10,2,16,16),.02,np.float32); mask=np.ones_like(a,bool)
         same=image_metrics(a,a,mask)

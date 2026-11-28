@@ -52,7 +52,9 @@ def load_annotations(path, sources):
 def load_extractor(path, device):
     import torch
 
-    extractor = torch.jit.load(str(path), map_location=device).eval()
+    # Python opens Unicode paths on Windows without the TorchScript narrow-path loader.
+    with Path(path).open('rb') as handle:
+        extractor = torch.jit.load(handle, map_location=device).eval()
     for parameter in extractor.parameters():
         parameter.requires_grad_(False)
 

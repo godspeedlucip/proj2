@@ -22,7 +22,7 @@ def gaussian_weight(shape):
     return np.maximum(weight,1e-4).astype(np.float32)
 
 
-def predict_volume(model,cbct,prior,normalization,mode='tiled',tile=(32,128,128),overlap=(16,64,64),device='cpu',amp=True):
+def predict_volume(model,cbct,prior,normalization,mode='tiled',tile=(32,128,128),overlap=(16,64,64),device='cpu',amp=True,temporal_topology=None):
     if len(cbct.shape)!=4 or prior.shape!=cbct.shape[1:]: raise ValueError('Expected matching TZYX CBCT and ZYX prior')
     model.eval(); device=torch.device(device)
     t,z,y,x=cbct.shape; scale=normalization['scale']; offset=normalization['offset']
@@ -32,7 +32,7 @@ def predict_volume(model,cbct,prior,normalization,mode='tiled',tile=(32,128,128)
         inp=np.stack([(c+offset)/scale,np.broadcast_to((p+offset)/scale,c.shape)])
         tensor=torch.from_numpy(np.ascontiguousarray(inp)).unsqueeze(0).to(device)
         autocast=torch.cuda.amp.autocast() if device.type=='cuda' and amp else contextlib.nullcontext()
-        with torch.no_grad(),autocast: output=forward_volume(model,tensor)
+        with torch.no_grad(),autocast: output=forward_volume(model,tensor,temporal_topology=temporal_topology)
         if not torch.isfinite(output).all(): raise FloatingPointError('Nonfinite prediction')
         return output[0,0].float().cpu().numpy()
     if mode=='full':

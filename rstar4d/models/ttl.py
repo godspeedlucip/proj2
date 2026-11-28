@@ -34,8 +34,9 @@ class _TemporalBlock(nn.Module):
         super().__init__()
         self.norm1 = nn.LayerNorm(256)
         self.qkv = nn.Linear(256, 3 * 256)
-        self.head_bias = nn.Parameter(torch.zeros(16))
+        self.head_bias = nn.Parameter(torch.empty(16))
         self.proj = nn.Linear(256, 256)
+        nn.init.trunc_normal_(self.head_bias, std=0.02)
         self.norm2 = nn.LayerNorm(256)
         self.mlp = nn.Sequential(nn.Linear(256, 1024), nn.GELU(), nn.Linear(1024, 256))
 

@@ -10,10 +10,10 @@ from rstar4d.config import train_defaults
 from rstar4d.utils.io import atomic_jsonl, atomic_json, sha256
 
 
-def fixture(root,t=10,animal='a',case='case',shape=(4,16,16)):
+def fixture(root,t=10,animal='a',case='case',shape=(4,16,16),temporal_topology='ordered_states'):
     a=np.random.default_rng(1).random((t,*shape),dtype=np.float32)*.02
     p=root/(case+'.h5')
-    meta=basic_metadata(t,[1,1,1]); meta['normalization']={'scale':.02,'offset':0.}
+    meta=basic_metadata(t,[1,1,1],temporal_topology=temporal_topology); meta['normalization']={'scale':.02,'offset':0.}
     affine=np.eye(4); affine[:3,3]=-(np.asarray(shape)-1)/2
     meta['geometry']={'shape_zyx':list(shape),'voxel_spacing_zyx_mm':[1,1,1],
         'center_zyx_mm':[0,0,0],'voxel_to_scanner_zyx':affine.tolist()}

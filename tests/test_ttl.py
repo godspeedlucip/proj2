@@ -98,6 +98,10 @@ class TTLTests(unittest.TestCase):
     def test_nonzero_slice_reference(self):
         ttl = TemporalTransformerSkip('full', z_chunk_size=2).eval()
         self.assertEqual(sum(p.numel() for p in ttl.parameters()), 1_887_136)
+        self.assertEqual(torch.count_nonzero(ttl.temporal.weight).item(), 0)
+        self.assertEqual(torch.count_nonzero(ttl.temporal.bias).item(), 0)
+        for block in ttl.blocks:
+            self.assertEqual(torch.count_nonzero(block.head_bias).item(), 16)
         for phases in (10, 11):
             with self.subTest(phases=phases), torch.no_grad():
                 x = torch.randn(2, 64, phases, 3, 4, 6)

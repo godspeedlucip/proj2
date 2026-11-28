@@ -45,6 +45,7 @@ def parser():
     d.add_argument('--motion-tolerance-ml', type=float, default=0.)
     d.add_argument('--out', required=True)
     d=sub.add_parser('benchmark'); d.add_argument('--config'); d.add_argument('--stage',type=int,choices=[1,2],default=2); d.add_argument('--phase-count',type=int,default=11); d.add_argument('--steps',type=int,default=2); d.add_argument('--weights'); d.add_argument('--out')
+    d.add_argument('--temporal-topology', choices=['ordered_states', 'cyclic'])
     return p
 
 
@@ -69,25 +70,98 @@ def doctor(skip_tigre=False):
     return result
 
 
-def benchmark(config, stage, t, steps, weights=None):
-    from .config import validate_train
-    from .models import attach_stam, create_model, forward_volume, initialize_stage2, model_from_checkpoint
-    from .training.trainer import make_optimizer, select_device
+def _benchmark_inference(model, forward, device):
+    model.eval()
+    cuda = device.type == 'cuda'
+    with torch.no_grad():
+        forward()
+        if cuda:
+            torch.cuda.synchronize(device)
+            torch.cuda.reset_peak_memory_stats(device)
+        start = time.perf_counter()
+        pred = forward()
+        if cuda:
+            torch.cuda.synchronize(device)
+        seconds = time.perf_counter() - start
+        peak = torch.cuda.max_memory_allocated(device) / 1024**3 if cuda else None
+        if not torch.isfinite(pred).all():
+            raise FloatingPointError('Nonfinite benchmark inference')
+    return {'seconds': seconds, 'peak_allocated_gib': peak}
+
+
+def _benchmark_updates(forward, optimizer, scaler, target, valid, stage, loss_config, device, steps):
     from .training.losses import compute_loss
+
+    times = []
+    overflows = 0
+    started = time.perf_counter()
+    while len(times) < steps and overflows < 16:
+        start = time.perf_counter()
+        optimizer.zero_grad(set_to_none=True)
+        loss = compute_loss(forward(), target, valid, stage, loss_config)['total']
+        loss_value = float(loss.detach())
+        if not torch.isfinite(loss):
+            raise FloatingPointError('Nonfinite benchmark loss')
+        scaler.scale(loss).backward()
+        if not scaler.is_enabled() and any(
+            p.grad is not None and not torch.isfinite(p.grad).all()
+            for group in optimizer.param_groups for p in group['params']
+        ):
+            raise FloatingPointError('Nonfinite benchmark gradient')
+        scale = scaler.get_scale()
+        scaler.step(optimizer)
+        scaler.update()
+        if device.type == 'cuda':
+            torch.cuda.synchronize(device)
+        if scaler.get_scale() < scale:
+            overflows += 1
+        else:
+            times.append(time.perf_counter() - start)
+        del loss
+    if len(times) != steps:
+        raise RuntimeError(f'Benchmark obtained {len(times)}/{steps} effective updates with {overflows} AMP overflows')
+    return time.perf_counter() - started, times, overflows, loss_value
+
+
+def benchmark(config, stage, t, steps, weights=None, temporal_topology=None):
+    from .config import validate_train
+    from .models import attach_stam, attach_ttl, create_model, forward_volume, initialize_stage2, model_from_checkpoint
+    from .training.trainer import _check_ttl_optimizer, load_stam_parent, make_optimizer, select_device
     from .utils.seed import seed_all
 
     if steps < 1 or t < 2:
         raise ValueError('Positive steps and at least two phases required')
     config = validate_train(config, stage)
+    ttl = config['ttl']
+    ttl_enabled = ttl['mode'] != 'off'
     device = select_device(config['device'])
+    cuda = device.type == 'cuda'
+    use_amp = cuda and config['amp']
     patches = [config['stage1_patch']] if stage == 1 else config['stage2_patches']
-    value = torch.load(weights, map_location='cpu', weights_only=True) if weights else None
-    if value is not None and (value.get('stage', stage) != stage or
-                              value.get('model_profile', config['model_profile']) != config['model_profile']):
-        raise ValueError('Benchmark checkpoint stage or model profile differs from the configuration')
-    if value is not None and value.get('stam') and config['stam']['mode'] == 'off':
-        from_checkpoint = value['config']['stam']
-        config = validate_train(dict(config, stam=from_checkpoint), stage)
+    weight_digest = None
+    if ttl_enabled:
+        if not weights:
+            raise ValueError('TTL benchmark requires --weights with a Stage II STAM parent checkpoint')
+        if ttl['mode'] == 'local3' and temporal_topology not in ('ordered_states', 'cyclic'):
+            raise ValueError('local3 benchmark requires an explicit --temporal-topology')
+        seed_all(config['seed'], config['deterministic'], config['threads'])
+        first_parent, value, weight_digest = load_stam_parent(weights, config)
+        config['stam'].update(mode=first_parent.stam.mode, z_chunk_size=first_parent.stam.z_chunk_size,
+                              activation_checkpointing=first_parent.stam.activation_checkpointing)
+    else:
+        value = torch.load(weights, map_location='cpu', weights_only=True) if weights else None
+        if value is not None and (value.get('stage', stage) != stage or
+                                  value.get('model_profile', config['model_profile']) != config['model_profile']):
+            raise ValueError('Benchmark checkpoint stage or model profile differs from the configuration')
+        if value is not None and value.get('ttl') is not None:
+            raise ValueError('Use the Stage II STAM parent weights to benchmark TTL')
+        if value is not None and value.get('stam') and config['stam']['mode'] == 'off':
+            from_checkpoint = value.get('config', {}).get('stam', {})
+            config = validate_train(dict(config, stam={
+                **from_checkpoint, 'mode': value['stam']['architecture']['mode'],
+            }), stage)
+        weight_digest = sha256(weights) if weights else None
+
     stam = config['stam']
     enabled = stam['mode'] != 'off'
     backbone_frozen = enabled and stam['train_policy'] != 'joint'
@@ -101,10 +175,13 @@ def benchmark(config, stage, t, steps, weights=None):
         if value is not None and value.get('stam'):
             if value['stam']['architecture']['mode'] != stam['mode']:
                 raise ValueError('Benchmark checkpoint STAM mode differs from the configuration')
-            model = model_from_checkpoint(value, stage, config['model_profile'])
+            if ttl_enabled and first_parent is not None:
+                model, first_parent = first_parent, None
+            else:
+                model = model_from_checkpoint(value, stage, config['model_profile'])
             model.stam.z_chunk_size = stam['z_chunk_size']
             model.stam.activation_checkpointing = stam['activation_checkpointing']
-            sam_source = value['stam']['sam_source']
+            sam_source = value['stam'].get('sam_source')
         else:
             model = create_model(stage, config['model_profile'])
             if value is not None:
@@ -113,82 +190,79 @@ def benchmark(config, stage, t, steps, weights=None):
                 initialize_stage2(model, create_model(1, config['model_profile']).state_dict())
             if enabled:
                 sam_source = attach_stam(model, stam, load_sam=True)
-        model.to(device).train()
-        optimizer = make_optimizer(model, config, backbone_frozen)
-        use_amp = device.type == 'cuda' and config['amp']
-        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+        model.to(device)
         x = torch.rand(1, 2, t, *patch, device=device)
         target = torch.rand(1, 1, t, *patch, device=device)
         valid = torch.ones_like(target, dtype=torch.bool)
-        before = {name: param.detach().cpu().clone() for name, param in model.named_parameters()}
-        if device.type == 'cuda':
+
+        def forward():
+            with torch.cuda.amp.autocast() if use_amp else contextlib.nullcontext():
+                return forward_volume(model, x, temporal_topology=temporal_topology)
+
+        if ttl_enabled:
+            parent_inference = _benchmark_inference(model, forward, device)
+            # Isolate TTL initialization from how many random tensors a parent rebuild consumed.
+            seed_all(config['seed'], config['deterministic'], config['threads'])
+            attach_ttl(model, ttl).to(device)
+        else:
+            model.train()
+        optimizer = make_optimizer(model, config, backbone_frozen)
+        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+        before = {name: tensor.detach().cpu().clone() for name, tensor in model.state_dict().items()}
+        args = (forward, optimizer, scaler, target, valid, stage, loss_config, device)
+        if ttl_enabled:
+            _check_ttl_optimizer(model, optimizer)
+            _, _, warmup_overflows, _ = _benchmark_updates(*args, steps=1)
+        if cuda:
             torch.cuda.synchronize(device)
             free, total = torch.cuda.mem_get_info(device.index)
             torch.cuda.reset_peak_memory_stats(device)
-        start = time.perf_counter()
-        updates = overflows = 0
-        while updates < steps and overflows < 16:
-            optimizer.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast() if use_amp else contextlib.nullcontext():
-                pred = forward_volume(model, x)
-            loss = compute_loss(pred, target, valid, stage, loss_config)['total']
-            if not torch.isfinite(loss):
-                raise FloatingPointError('Nonfinite benchmark loss')
-            scaler.scale(loss).backward()
-            if not use_amp and not all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters()):
-                raise FloatingPointError('Nonfinite benchmark gradient')
-            scale = scaler.get_scale()
-            scaler.step(optimizer)
-            scaler.update()
-            if scaler.get_scale() < scale:
-                overflows += 1
-            else:
-                updates += 1
-            loss_value = float(loss.detach())
-            del pred, loss
-        if device.type == 'cuda':
-            torch.cuda.synchronize(device)
-        elapsed = time.perf_counter() - start
-        peak_allocated = torch.cuda.max_memory_allocated(device) / 1024**3 if device.type == 'cuda' else None
-        peak_reserved = torch.cuda.max_memory_reserved(device) / 1024**3 if device.type == 'cuda' else None
-        changed = {name for name, param in model.named_parameters() if not torch.equal(before[name], param.detach().cpu())}
-        backbone_changed = any(not name.startswith('stam.') for name in changed)
+        elapsed, timings, overflows, loss_value = _benchmark_updates(*args, steps=steps)
+        peak_allocated = torch.cuda.max_memory_allocated(device) / 1024**3 if cuda else None
+        peak_reserved = torch.cuda.max_memory_reserved(device) / 1024**3 if cuda else None
+        changed = {name for name, param in model.named_parameters()
+                   if not torch.equal(before[name], param.detach().cpu())}
+        backbone_changed = any(not name.startswith(('stam.', 'ttl.')) for name in changed)
         projection_changed = 'stam.output_projection.weight' in changed
         sam_changed = any(name.startswith('stam.sam.') for name in changed)
-        expected_update = (projection_changed and not sam_changed and backbone_changed != backbone_frozen
-                           if enabled else backbone_changed)
-        if updates != steps or not expected_update:
-            raise RuntimeError(f'Benchmark update failed: useful={updates}/{steps}, overflows={overflows}, '
-                               f'backbone={backbone_changed}, output_projection={projection_changed}, SAM={sam_changed}')
+        if ttl_enabled:
+            parent_unchanged = all(torch.equal(before[name], tensor.detach().cpu())
+                                   for name, tensor in model.state_dict().items() if not name.startswith('ttl.'))
+            expected_update = 'ttl.temporal.weight' in changed and parent_unchanged
+        else:
+            expected_update = (projection_changed and not sam_changed and backbone_changed != backbone_frozen
+                               if enabled else backbone_changed)
+        if not expected_update:
+            raise RuntimeError(f'Benchmark update failed: backbone={backbone_changed}, '
+                               f'STAM projection={projection_changed}, SAM={sam_changed}, TTL={ttl_enabled}')
         trainable = sum(param.numel() for param in model.parameters() if param.requires_grad)
         parameters = sum(param.numel() for param in model.parameters())
+        optimizer_groups = [group.get('name') for group in optimizer.param_groups]
         optimizer.zero_grad(set_to_none=True)
-        del optimizer, scaler, before
-        model.eval()
-        infer_start = time.perf_counter()
-        with torch.no_grad(), torch.cuda.amp.autocast() if use_amp else contextlib.nullcontext():
-            pred = forward_volume(model, x)
-        if not torch.isfinite(pred).all():
-            raise FloatingPointError('Nonfinite benchmark inference')
-        if device.type == 'cuda':
-            torch.cuda.synchronize(device)
-        results.append({
-            'shape': [1, 2, t, *patch], 'steps': updates, 'amp_overflows': overflows,
-            'seconds': elapsed, 'seconds_per_update': elapsed / updates,
-            'inference_seconds': time.perf_counter() - infer_start,
+        del optimizer, scaler, before, args
+        inference = _benchmark_inference(model, forward, device)
+        row = {
+            'shape': [1, 2, t, *patch], 'steps': len(timings), 'amp_overflows': overflows,
+            'seconds': elapsed, 'seconds_per_update': sum(timings) / len(timings),
+            'step_seconds': timings, 'inference_seconds': inference['seconds'],
+            'inference_peak_allocated_gib': inference['peak_allocated_gib'],
             'parameter_update': expected_update, 'loss': loss_value,
-            'parameters': parameters, 'trainable_parameters': trainable,
+            'parameters': parameters, 'trainable_parameters': trainable, 'optimizer_groups': optimizer_groups,
             'backbone_changed': backbone_changed, 'output_projection_changed': projection_changed,
             'sam_changed': sam_changed, 'peak_allocated_gib': peak_allocated, 'peak_reserved_gib': peak_reserved,
-            'gpu_free_at_start_gib': free / 1024**3 if device.type == 'cuda' else None,
-            'gpu_total_gib': total / 1024**3 if device.type == 'cuda' else None,
-        })
-        del model, x, target, valid, pred
+            'gpu_free_at_start_gib': free / 1024**3 if cuda else None,
+            'gpu_total_gib': total / 1024**3 if cuda else None,
+        }
+        if ttl_enabled:
+            row.update(parent_state_unchanged=parent_unchanged, parent_inference=parent_inference,
+                       warmup_updates=1, warmup_amp_overflows=warmup_overflows)
+        results.append(row)
+        del model, x, target, valid
         gc.collect()
-        if device.type == 'cuda':
+        if cuda:
             torch.cuda.empty_cache()
     return {'environment': environment(), 'stage': stage, 'model_profile': config['model_profile'],
-            'config': config, 'weights_sha256': sha256(weights) if weights else None,
+            'config': config, 'weights_sha256': weight_digest, 'temporal_topology': temporal_topology,
             'sam_source': sam_source, 'results': results}
 
 def dispatch(args):
@@ -270,7 +344,7 @@ def dispatch(args):
         atomic_json(args.out, result)
         return result
     if command=='benchmark':
-        result=benchmark(load_config(args.config),args.stage,args.phase_count,args.steps,args.weights)
+        result=benchmark(load_config(args.config),args.stage,args.phase_count,args.steps,args.weights,args.temporal_topology)
         if args.out: atomic_json(args.out,result)
         return result
     raise ValueError('Unhandled command')
