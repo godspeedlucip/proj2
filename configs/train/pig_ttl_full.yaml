@@ -7,9 +7,7 @@ seed: 2026
 epochs: {'1': 60, '2': 30}
 steps_per_epoch: {'2': 0}  # Existing default: 15 draws per training case per epoch
 learning_rate: 0.00015
-milestones: {'1': [20, 30, 40], '2': [10, 20, 25]}
-scheduler: multistep
-gamma: 0.5
+scheduler: poly  # nnU-Net-style polynomial decay over the configured epoch budget
 loss: {kind: public_code, ssim_weight: 0.1}
 normalization: {scale: 0.02, offset: 0.0}
 stage2_patches: [[16, 128, 128], [32, 96, 96], [64, 64, 64]]

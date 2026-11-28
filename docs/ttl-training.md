@@ -15,7 +15,9 @@ python -m rstar4d validate-data --manifest $manifest --split $split
 
 从 `configs/train/pig_ttl_full.yaml` 创建每个种子的配置。按获胜检查点核对 `model_profile`、`loss`、`normalization` 和 `temporal_roll`。训练入口还会核验数据快照、动物划分、强度域、校准方式及相位拓扑。省略 `stam.mode` 即继承父模式，显式指定时须与父检查点一致。
 
-模板中的学习率、轮数和里程碑沿用现有 Stage II 配方，可作为启动参数。测试前锁定 TTL 学习率、日程、有效更新预算、精度、tile/overlap、评价配置与运动容许量。示例使用 AMP 和 tile `32 128 128`、overlap `16 64 64`。FP32 运行时，各组推理统一添加 `--fp32`。
+模板使用与 nnU-Net 相同形式的逐轮多项式衰减。第 1 轮使用初始学习率 1.5e-4，已完成 t 轮时下一轮的学习率为 1.5e-4 × (1 − t/N)^0.9，N 取 Stage II 的总轮数。模板默认 N=30，开跑前可将 `epochs["2"]` 改为其他预算，例如 60。使用 `--stop-after-epoch 30` 暂停、再从同一运行的 `last.pt` 续训时，日程继续按最初锁定的总轮数执行。[nnU-Net PolyLR](https://github.com/MIC-DKFZ/nnUNet/blob/master/nnunetv2/training/lr_scheduler/polylr.py)
+
+测试前锁定 TTL 学习率、日程、有效更新预算、精度、tile/overlap、评价配置与运动容许量。示例使用 AMP 和 tile `32 128 128`、overlap `16 64 64`。FP32 运行时，各组推理统一添加 `--fp32`。
 
 ## 资源预检
 

@@ -64,7 +64,7 @@ def validate_train(cfg, stage=None):
             raise ValueError('TTL requires STAM; omit stam.mode to read it from the parent checkpoint')
     if cfg['model_profile'] not in ('official_v1','pig_ordered_v1'): raise ValueError('Unknown model profile')
     if cfg['loss']['kind'] not in ('public_code','l1','physical_ssim'): raise ValueError('Unknown loss kind')
-    if cfg['scheduler'] not in ('multistep','cosine'): raise ValueError('Unknown scheduler')
+    if cfg['scheduler'] not in ('multistep','cosine','poly'): raise ValueError('Unknown scheduler')
     if cfg['small_volume'] not in ('error','pad'): raise ValueError('small_volume must be error or pad')
     if cfg['workers']<0 or cfg['threads']<1 or cfg['accumulation']<1: raise ValueError('Invalid worker/thread/accumulation count')
     if cfg['normalization']['scale']<=0 or cfg['learning_rate']<=0: raise ValueError('scale and learning_rate must be positive')

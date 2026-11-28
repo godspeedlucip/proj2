@@ -118,6 +118,31 @@ class TTLTrainingTests(unittest.TestCase):
             for name, tensor in winner['state_dict'].items():
                 self.assertTrue(torch.equal(tensor, repaired['state_dict'][name]), name)
 
+    def test_ttl_poly_matches_epoch_budget_after_resume(self):
+        from rstar4d.utils.io import read_jsonl
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cfg, manifest, split, init = ttl_inputs(root)
+            total_epochs = 4
+            cfg['scheduler'] = 'poly'
+            cfg['epochs']['2'] = total_epochs
+            cfg['steps_per_epoch']['2'] = 1
+            run = root/'poly'
+            partial = train(cfg, manifest, split, run, 2, init=init, stop_after_epoch=2)
+            self.assertFalse(partial['complete'])
+            final = train(cfg, manifest, split, run, 2, resume=partial['last'])
+            self.assertTrue(final['complete'])
+            epochs = [row for row in read_jsonl(run/'train.jsonl') if row['event'] == 'epoch']
+            self.assertEqual([row['epoch'] for row in epochs], [1, 2, 3, 4])
+            for row in epochs:
+                finished = row['epoch'] - 1
+                expected = cfg['learning_rate'] * (1 - finished / total_epochs) ** 0.9
+                self.assertAlmostEqual(row['lr'], expected, delta=1e-12)
+            last = load_checkpoint(final['last'])
+            self.assertEqual(last['step'], total_epochs)
+            self.assertEqual(last['optimizer']['param_groups'][0]['lr'], 0.0)
+
     def test_ttl_resume_matches_continuous(self):
         import subprocess
         import sys

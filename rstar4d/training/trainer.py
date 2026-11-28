@@ -380,8 +380,14 @@ def train(config, manifest, split, run_dir, stage, resume=None, init=None, stop_
                 or (resume and saved_stam['train_policy'] != policy)):
             raise ValueError('Training checkpoint has incompatible STAM optimizer groups or freeze state')
     total_epochs=config['epochs'][str(stage)]
-    scheduler=(torch.optim.lr_scheduler.MultiStepLR(optimizer,milestones=config['milestones'][str(stage)],gamma=config['gamma'])
-        if config['scheduler']=='multistep' else torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=total_epochs,eta_min=config['min_lr']))
+    if config['scheduler'] == 'poly':
+        scheduler = torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=total_epochs, power=0.9)
+    elif config['scheduler'] == 'multistep':
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(
+            optimizer, milestones=config['milestones'][str(stage)], gamma=config['gamma'])
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=total_epochs, eta_min=config['min_lr'])
     scaler=torch.cuda.amp.GradScaler(enabled=device.type=='cuda' and config['amp'])
     start_epoch=config['stage2_start_epoch'] if stage == 2 else 1
     step=0; best=math.inf
